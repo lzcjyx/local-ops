@@ -27,7 +27,22 @@ def migrate_config_v0_to_v1(raw):
     return migrated
 
 
-CONFIG_MIGRATIONS = {0: migrate_config_v0_to_v1}
+def migrate_config_v1_to_v2(raw):
+    """v2 adds the M3 project domain; the legacy ``apps`` array is retained
+    as the runtime-identity surface.  Project/resource population happens
+    later through ``assign_resources_from_apps`` (idempotent, in-memory)."""
+    migrated = dict(raw)
+    migrated["schemaVersion"] = 2
+    migrated.setdefault("workspaces", [])
+    migrated.setdefault("projects", [])
+    migrated.setdefault("resources", [])
+    return migrated
+
+
+CONFIG_MIGRATIONS = {
+    0: migrate_config_v0_to_v1,
+    1: migrate_config_v1_to_v2,
+}
 
 
 def migrate_config(raw):
@@ -241,4 +256,5 @@ __all__ = [
     "DEFAULT_UI_THEME",
     "migrate_config",
     "migrate_config_v0_to_v1",
+    "migrate_config_v1_to_v2",
 ]

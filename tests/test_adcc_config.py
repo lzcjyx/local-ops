@@ -96,7 +96,9 @@ class ConfigModuleTests(unittest.TestCase):
                 migrated = json.load(handle)
             with open(path + ".bak", "r", encoding="utf-8") as handle:
                 backup = json.load(handle)
-            self.assertEqual(migrated["schemaVersion"], 1)
+            # v2 迁移（M3 项目域）：主文件升到 2，备份保留未迁移原文
+            self.assertEqual(migrated["schemaVersion"], 2)
+            self.assertIn("projects", migrated)
             self.assertNotIn("schemaVersion", backup)
 
             with open(path + ".bak", "rb") as handle:

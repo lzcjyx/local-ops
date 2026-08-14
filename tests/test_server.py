@@ -423,7 +423,7 @@ class ConfigTests(unittest.TestCase):
                 migrated = json.load(f)
             with open(path + ".bak", "r", encoding="utf-8") as f:
                 previous = json.load(f)
-            self.assertEqual(migrated["schemaVersion"], 1)
+            self.assertEqual(migrated["schemaVersion"], 2)
             self.assertNotIn("schemaVersion", previous)
 
             # 第二次读取已是当前 schema，不再改写备份。

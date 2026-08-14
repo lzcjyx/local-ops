@@ -44,6 +44,11 @@ from adcc.core.constants import (
 )
 from adcc.core.errors import ConfigSchemaError, FutureConfigSchemaError
 from adcc.platform import get_platform_adapter
+from adcc.projects import (
+    assign_resources_from_apps,
+    project_summary,
+)
+from adcc.projects.detection import detect_mcp_servers, git_root
 from adcc.runtime.lifecycle import (
     legacy_candidate_pids as core_legacy_candidate_pids,
     legacy_identity_applicable as core_legacy_identity_applicable,
@@ -649,6 +654,18 @@ def build_apps(cfg, listeners, groups=None):
         port_map.setdefault(port, []).append(pid)
     apps_cfg = cfg.get("apps") or []
     managed, snap, _ = managed_process_index(apps_cfg, groups)
+    # M3：resource → legacy app 关联，供前端按项目分组
+    project_by_app = {}
+    if cfg.get("projects"):
+        project_names = {
+            project.get("id"): project.get("name")
+            for project in cfg.get("projects") or []}
+        for resource in cfg.get("resources") or []:
+            app_id = resource.get("app_id")
+            if app_id:
+                project_by_app[app_id] = (
+                    resource.get("project_id"),
+                    project_names.get(resource.get("project_id")))
     listen_by_pid = {}
     for pid, port in listeners:
         listen_by_pid.setdefault(pid, []).append(port)
@@ -735,8 +752,35 @@ def build_apps(cfg, listeners, groups=None):
             "portConflict": False,
             "portConflictApps": [],
             "legacyManaged": bool(legacy_pid),
+            "projectId": (project_by_app.get(app["id"]) or (None, None))[0],
+            "projectName": (project_by_app.get(app["id"]) or (None, None))[1],
         })
     return apps
+
+
+def ensure_project_domain(cfg):
+    """legacy apps → projects 一次性幂等填充（M3 §9.2）。"""
+    try:
+        cfg.update(assign_resources_from_apps)
+    except Exception:
+        LOG.exception("项目域填充失败")
+
+
+def build_project_summaries(cfg, app_rows):
+    """项目摘要：资源计数 + 运行计数（运行时身份仍来自 legacy apps）。"""
+    projects = cfg.get("projects") or []
+    if not projects:
+        return []
+    resources = cfg.get("resources") or []
+    running_app_ids = {
+        row.get("id") for row in app_rows if row.get("running")}
+    running_resource_ids = {
+        resource.get("id") for resource in resources
+        if resource.get("app_id") in running_app_ids}
+    return [
+        project_summary(project, resources, running_resource_ids)
+        for project in projects
+    ]
 
 
 def build_state(cfg, console_port, config_health=None):
@@ -770,10 +814,16 @@ def build_state(cfg, console_port, config_health=None):
             {"component": "version", "error": VERSION_LOAD_ERROR})
     for issue in (config_health or {}).get("issues", []):
         degraded_reasons.append({"component": "config", "error": issue})
+    try:
+        projects = build_project_summaries(cfg, apps)
+    except Exception:
+        LOG.exception("构建项目摘要失败")
+        projects = []
     return {
         "services": services,
         "watched": watched,
         "apps": apps,
+        "projects": projects,
         "watchedKeywords": cfg.get("watchedKeywords") or [],
         "consolePort": console_port,
         "consolePid": SELF_PID,
@@ -1543,11 +1593,16 @@ def detect_project(root):
         note_file("index.html")
         add(_python_cmd(True) + " http.server 8000", "静态网站预览", "index.html", 8000, 90)
 
+    # M3：MCP 服务器候选（.mcp.json / package.json mcp 字段，只读检测）
+    for mcp in detect_mcp_servers(root):
+        candidates.append(mcp)
+
     candidates.sort(key=lambda item: item.pop("_priority"))
     return {
         "ok": True,
         "cwd": root,
         "name": os.path.basename(root) or root,
+        "repoPath": git_root(root),
         "files": detected_files,
         "candidates": candidates[:8],
     }, None
@@ -3374,6 +3429,7 @@ def _run_console(preferred_port=None, open_browser=True):
         _ensure_private_dir(private_dir)
     start_log_maintenance()
     cfg = Config(CONFIG_PATH)
+    ensure_project_domain(cfg)
 
     server, port = None, None
     candidates = list(range(PORT_START, PORT_START + PORT_TRIES))

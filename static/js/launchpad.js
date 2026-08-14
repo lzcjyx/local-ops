@@ -1002,12 +1002,14 @@ export function renderLaunchpad(apps, firstRender) {
 }
 
 function syncSvcFilterUI() {
-  renderFilterChips($('#svcFilter'), SVC_FILTERS, latestSvcs, svcFilter, matchSvcFilter,
+  resetStaleProjectFilter();
+  renderFilterChips($('#svcFilter'), projectFilterDefs(SVC_FILTERS), latestSvcs, svcFilter, matchSvcFilter,
     f => { svcFilter = f; syncSvcFilterUI(); });
   applyGridFilter(svcGrid, latestSvcs, matchSvcFilter, svcFilter);
 }
 function syncTaskFilterUI() {
-  renderFilterChips($('#taskFilter'), TASK_FILTERS, latestTasks, taskFilter, matchTaskFilter,
+  resetStaleProjectFilter();
+  renderFilterChips($('#taskFilter'), projectFilterDefs(TASK_FILTERS), latestTasks, taskFilter, matchTaskFilter,
     f => { taskFilter = f; syncTaskFilterUI(); });
   applyGridFilter(taskGrid, latestTasks, matchTaskFilter, taskFilter);
 }
@@ -1052,6 +1054,31 @@ let svcFilter = 'all', taskFilter = 'all';
 /* 芯片按钮只创建一次，点击时必须读取当轮数据而不是首次渲染的闭包快照 */
 let latestSvcs = [], latestTasks = [];
 
+/* M3：动态追加项目过滤芯片（defs 按项目集合缓存，避免每轮重建） */
+let svcFilterDefsCache = null, taskFilterDefsCache = null;
+function projectFilterDefs(base) {
+  const projects = (state.data && state.data.projects) || [];
+  const key = 'p' + projects.map(p => p.id).join(',');
+  const cache = base === SVC_FILTERS ? svcFilterDefsCache : taskFilterDefsCache;
+  if (cache && cache._key === key) return cache;
+  const defs = base.map(entry => entry.slice());
+  for (const project of projects) {
+    defs.push(['project:' + project.id, project.name]);
+  }
+  defs._key = key;
+  if (base === SVC_FILTERS) svcFilterDefsCache = defs;
+  else taskFilterDefsCache = defs;
+  return defs;
+}
+function resetStaleProjectFilter() {
+  const projects = new Set(((state.data && state.data.projects) || []).map(p => p.id));
+  if (svcFilter.startsWith('project:') && !projects.has(svcFilter.slice(8))) svcFilter = 'all';
+  if (taskFilter.startsWith('project:') && !projects.has(taskFilter.slice(8))) taskFilter = 'all';
+}
+function matchProjectFilter(app, filter) {
+  return app.projectId === filter.slice('project:'.length);
+}
+
 function svcHasError(app) {
   if (app.portConflict || app.portOccupied || hasPortMismatch(app)) return true;
   if (!app.running && app.health && app.health.blocking) return true;
@@ -1066,10 +1093,12 @@ function matchSvcFilter(app, filter) {
   if (filter === 'running') return !!app.running;
   if (filter === 'stopped') return !app.running;
   if (filter === 'error') return svcHasError(app);
+  if (filter.startsWith('project:')) return matchProjectFilter(app, filter);
   return true;
 }
 function matchTaskFilter(app, filter) {
   if (filter === 'running') return !!app.running;
+  if (filter.startsWith('project:')) return matchProjectFilter(app, filter);
   if (filter === 'all') return true;
   if (app.running || !app.lastExit) return false;
   const status = taskExitStatus(app.lastExit);

@@ -165,17 +165,17 @@ On Windows and macOS:
 
 ## Tasks
 
-- [ ] Implement `Workspace`, `Project`, and `ResourceDefinition` models.
-- [ ] Add project registry CRUD.
-- [ ] Associate service/task definitions with projects.
-- [ ] Add `mcp_server` resource kind.
-- [ ] Add read-only project detection wrapper using existing detection capabilities.
-- [ ] Detect Git root.
-- [ ] Add migration from existing flat local-ops app config.
-- [ ] Create `Unassigned` bucket for ambiguous resources.
-- [ ] Ensure migration is versioned, idempotent and backed up.
-- [ ] Add project summary to state API without breaking legacy fields yet.
-- [ ] Add project UI grouping to existing web UI.
+- [x] Implement `Workspace`, `Project`, and `ResourceDefinition` models.
+- [x] Add project registry CRUD.
+- [x] Associate service/task definitions with projects.
+- [x] Add `mcp_server` resource kind.
+- [x] Add read-only project detection wrapper using existing detection capabilities.
+- [x] Detect Git root.
+- [x] Add migration from existing flat local-ops app config.
+- [x] Create `Unassigned` bucket for ambiguous resources.
+- [x] Ensure migration is versioned, idempotent and backed up.
+- [x] Add project summary to state API without breaking legacy fields yet.
+- [x] Add project UI grouping to existing web UI.
 
 ## Exit gate
 
@@ -560,6 +560,7 @@ Coding agents should update only the status field/check boxes, not rewrite compl
 | M0 | COMPLETE | passed | Exact baseline macOS CI passed 159 Python + 7 JS tests; Windows baseline failures documented; architecture/API inventories added. |
 | M1 | COMPLETE | passed | `adcc/` 包提取 config/ports/processes/lifecycle/tasks 策略，`server.py` 减 611 行改为兼容入口委托（ADR-0001）；25 项新单测 + 58 项可移植测试在 Windows 本地通过，macOS 专属回归（fcntl/ps/lsof、159 全量 CI）待 macOS CI 运行确认；发行 allowlist/语法检查/发行测试已覆盖 `adcc/`。 |
 | M2 | COMPLETE | passed | PlatformAdapter（macos/windows/unsupported，ADR-0002）；Windows 本地启停/端口/身份/外部进程安全实测通过；CI 矩阵落地（macOS 审计 + Windows 可移植 202 测试）双平台全绿，M1/M2 macOS parity 一并确认（check + release 构建 + 可重复性验证通过）。 |
+| M3 | COMPLETE | passed | 项目域落地（ADR-0003）：schema v2 + workspace/project/resource 模型与 registry、legacy apps 惰性幂等迁移（Unassigned 桶 + app_id 桥）、git root/MCP 检测、state 项目摘要 + 前端项目过滤；165 项测试 + 20 项新项目域测试通过，Windows CI 全绿。 |
 | M2 | NOT STARTED | pending | |
 | M3 | NOT STARTED | pending | |
 | M4 | NOT STARTED | pending | |

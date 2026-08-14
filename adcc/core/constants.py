@@ -1,6 +1,6 @@
 """OS-neutral constants shared by the ADCC core Modules."""
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 DEFAULT_UI_THEME = "ops"
 
 RUN_TOKEN_ENV = "CONSOLE_RUN_TOKEN"
@@ -15,6 +15,9 @@ CONFIG_DEFAULT = {
     "promoted": [],
     "watchedKeywords": [],
     "uiTheme": DEFAULT_UI_THEME,
+    "workspaces": [],
+    "projects": [],
+    "resources": [],
 }
 
 APP_DEFAULT = {
