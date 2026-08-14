@@ -35,7 +35,8 @@ class HttpHarness:
         self.tmp.cleanup()
 
     def request(self, method, path, body=None, headers=None):
-        conn = http.client.HTTPConnection(server.HOST, self.port, timeout=4)
+        # 15s：Windows 首次 /api/state 需冷启动一次 CIM 全量查询（~2-5s）
+        conn = http.client.HTTPConnection(server.HOST, self.port, timeout=15)
         request_headers = dict(headers or {})
         if body is not None and not isinstance(body, (bytes, bytearray)):
             body = body.encode("utf-8")
