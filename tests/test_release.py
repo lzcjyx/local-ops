@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 import stat
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -8,6 +9,8 @@ import zipfile
 
 from tools import build_release as release
 from tools import check_project as project_check
+
+RELEASE_MODE_IS_POSIX = sys.platform != "win32"
 
 
 class ReleaseFixtureTests(unittest.TestCase):
@@ -56,6 +59,8 @@ class ReleaseFixtureTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "敏感文件"):
                 release.iter_release_files()
 
+    @unittest.skipUnless(RELEASE_MODE_IS_POSIX,
+                         "Windows 无特权 symlink 创建")
     def test_symlinked_required_source_is_rejected(self):
         target = self.write("target/server.py")
         (self.root / "server.py").symlink_to(target)
@@ -111,7 +116,8 @@ class ReleaseFixtureTests(unittest.TestCase):
             release.verify_archive(second, entries, "1.2.3")
 
         self.assertEqual(first.read_bytes(), second.read_bytes())
-        self.assertEqual(stat.S_IMODE(second.stat().st_mode), 0o644)
+        if RELEASE_MODE_IS_POSIX:
+            self.assertEqual(stat.S_IMODE(second.stat().st_mode), 0o644)
         with zipfile.ZipFile(second) as archive:
             infos = {info.filename: info for info in archive.infolist()}
         regular_info = infos["总控台-1.2.3/server.py"]

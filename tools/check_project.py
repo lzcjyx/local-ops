@@ -410,6 +410,8 @@ def check_javascript_bindings() -> str:
 
 
 def check_shell_and_plist() -> str:
+    if sys.platform != "darwin":
+        return "跳过（macOS 专属：/bin/bash、plutil 与 .app 启动脚本）"
     shell_files = (
         ROOT / "start.command",
         ROOT / "总控台.app" / "Contents" / "MacOS" / "launcher",
@@ -571,7 +573,9 @@ def check_javascript_tests() -> str:
     require(bool(node), "未找到 node，无法运行 JavaScript 测试")
     files = sorted(str(path) for path in (ROOT / "tests" / "js").glob("*.test.mjs"))
     require(bool(files), "tests/js/ 下没有 .test.mjs 测试文件")
-    output = command_output([node, "--test", *files])
+    # --test-reporter=tap：Windows 管道下默认 spec reporter 用系统代码页
+    # 输出（前缀含非 ASCII 符号），会破坏 TAP 摘要解析；tap 输出为纯 ASCII。
+    output = command_output([node, "--test", "--test-reporter=tap", *files])
     match = re.search(r"# (pass)\s+(\d+)", output)
     require(match is not None, "无法确认 node --test 结果")
     passed = int(match.group(2))
