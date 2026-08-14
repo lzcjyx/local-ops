@@ -39,7 +39,9 @@ node 101 user 1u IPv6 0x0 0t0 TCP [::1]:5173 (LISTEN)
 node 202 user 2u IPv4 0x0 0t0 TCP 127.0.0.1:8000 (LISTEN)
 node 303 user 3u IPv6 0x0 0t0 TCP *:3000 (LISTEN)
 """
-        with mock.patch.object(server, "run_cmd", return_value=output):
+        with mock.patch.object(
+                server.PLATFORM, "listeners",
+                return_value=server.parse_lsof_listeners(output)):
             listeners = server.scan_listeners()
 
         self.assertEqual(listeners[(101, 5173)], {"::1"})

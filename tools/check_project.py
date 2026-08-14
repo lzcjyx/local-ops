@@ -19,6 +19,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Windows runner 默认 cp1252 无法编码中文输出；统一 UTF-8 保证跨平台可解析。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "static"
