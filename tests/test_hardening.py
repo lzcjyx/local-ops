@@ -295,7 +295,8 @@ class OperationLockTests(unittest.TestCase):
     def setUp(self):
         self.h = HttpHarness()
         app = {**server.Config.APP_DEFAULT,
-               "id": "deadbeef", "name": "Service", "command": "sleep 10",
+               "id": "deadbeef", "name": "Service",
+               "command": '"%s" -c "import time; time.sleep(10)"' % sys.executable,
                "kind": "service", "cwd": self.h.tmp.name}
         self.h.cfg.update(lambda data: data["apps"].append(app))
 
@@ -386,6 +387,12 @@ class OperationLockTests(unittest.TestCase):
         stop.assert_not_called()
 
 
+MACOS_ONLY = unittest.skipUnless(
+    sys.platform == "darwin",
+    "macOS 专属：依赖 POSIX 信号/进程组语义")
+
+
+@MACOS_ONLY
 class ProcessLifecycleHardeningTests(unittest.TestCase):
     def _config_with_app(self, directory, app):
         path = os.path.join(directory, "config.json")
@@ -552,6 +559,8 @@ class StaticFileServingTests(unittest.TestCase):
         status, _, _ = self.h.request("GET", "/icons/../../etc/passwd")
         self.assertEqual(status, 404)
 
+    @unittest.skipUnless(sys.platform == "darwin",
+                         "Windows 无特权 symlink 创建")
     def test_symlink_inside_static_cannot_escape_to_outside(self):
         with tempfile.TemporaryDirectory() as td:
             outside = os.path.join(td, "secret.txt")
@@ -599,6 +608,8 @@ class KillEndpointTests(unittest.TestCase):
         self.assertFalse(body["ok"])
         self.assertIn("不存在", body["error"])
 
+    @unittest.skipUnless(sys.platform == "darwin",
+                         "macOS 专属：SIGTERM/SIGKILL 信号语义")
     def test_kill_sends_sigterm_to_owned_process(self):
         proc = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(30)"])
@@ -616,6 +627,8 @@ class KillEndpointTests(unittest.TestCase):
             if proc.poll() is None:
                 proc.kill()
 
+    @unittest.skipUnless(sys.platform == "darwin",
+                         "macOS 专属：SIGTERM 免疫/SIGKILL 信号语义")
     def test_kill_force_sends_sigkill_to_sigterm_immune_process(self):
         code = ("import signal,time; signal.signal(signal.SIGTERM,"
                 " signal.SIG_IGN); time.sleep(30)")

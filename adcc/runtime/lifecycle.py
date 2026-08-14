@@ -85,6 +85,58 @@ def managed_pids(
     ).get(app.get("id"), [])
 
 
+def managed_process_index_windows(
+        apps: Iterable[App],
+        process_snapshot: ProcessSnapshot,
+        origin_table: Mapping[int, tuple[int, str]],
+        *,
+        current_user: Any,
+        run_token_env_marker: str,
+) -> dict[Any, list[int]]:
+    """Windows managed identity from collected PID/ancestry facts.
+
+    Windows has no POSIX process groups and no portable way to read
+    another process's environment.  The adapter starts every managed app
+    through a ``cmd.exe`` wrapper whose command line carries
+    ``CONSOLE_RUN_TOKEN=<token>`` (``run_token_env_marker``); identity is
+    therefore: recorded ``lastPid`` alive, owned by the current user, and
+    carrying the matching marker in its command line.  Once the wrapper is
+    verified, its descendant tree (built from ``origin_table``) is treated
+    as managed, mirroring the macOS group-member rule.
+    """
+    app_list = list(apps)
+    descendants: dict[int, list[int]] = {}
+    for app in app_list:
+        token = app.get("runToken")
+        controller = app.get("lastPid")
+        if (not isinstance(token, str) or not token
+                or not isinstance(controller, int) or controller <= 0):
+            continue
+        entry = process_snapshot.get(controller)
+        if not entry:
+            continue
+        if entry.get("uid") != current_user:
+            continue
+        marker = run_token_env_marker + token
+        if marker not in entry.get("args", ""):
+            continue
+        children: dict[int, list[int]] = {}
+        for child, (parent, _) in origin_table.items():
+            children.setdefault(parent, []).append(child)
+        members = [controller]
+        stack = list(children.get(controller, []))
+        seen = set()
+        while stack:
+            current = stack.pop()
+            if current in seen or current == controller:
+                continue
+            seen.add(current)
+            members.append(current)
+            stack.extend(children.get(current, []))
+        descendants[app.get("id")] = members
+    return descendants
+
+
 def legacy_identity_applicable(app: App) -> bool:
     """Whether an app can use the legacy/attached identity seam."""
     port = app.get("port")

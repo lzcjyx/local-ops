@@ -120,31 +120,31 @@ docs/architecture/API_BASELINE.md
 
 ### Interface
 
-- [ ] Define `PlatformAdapter` capabilities from SPEC.
-- [ ] Add typed capability/unsupported errors.
-- [ ] Inject the adapter into runtime services; avoid global OS branching spread across modules.
+- [x] Define `PlatformAdapter` capabilities from SPEC.
+- [x] Add typed capability/unsupported errors.
+- [x] Inject the adapter into runtime services; avoid global OS branching spread across modules.
 
 ### macOS
 
-- [ ] Move existing macOS logic behind `MacOSPlatformAdapter`.
-- [ ] Preserve current ownership, process-origin and port behavior.
-- [ ] Run upstream parity tests.
+- [x] Move existing macOS logic behind `MacOSPlatformAdapter`.
+- [x] Preserve current ownership, process-origin and port behavior.
+- [x] Run upstream parity tests.
 
 ### Windows
 
-- [ ] Implement current-user process enumeration.
-- [ ] Implement listening-port enumeration.
-- [ ] Implement parent/process ancestry where available.
-- [ ] Implement process start with durable run identity.
-- [ ] Implement graceful stop and explicit force semantics.
-- [ ] Implement process-tree handling safely.
-- [ ] Implement cwd/command retrieval with graceful `unknown` fallback.
-- [ ] Add Windows-specific tests and smoke fixtures.
+- [x] Implement current-user process enumeration.
+- [x] Implement listening-port enumeration.
+- [x] Implement parent/process ancestry where available.
+- [x] Implement process start with durable run identity.
+- [x] Implement graceful stop and explicit force semantics.
+- [x] Implement process-tree handling safely.
+- [x] Implement cwd/command retrieval with graceful `unknown` fallback.
+- [x] Add Windows-specific tests and smoke fixtures.
 
 ### CI
 
 - [ ] Add Windows to CI matrix for tests that are now portable.
-- [ ] Keep macOS CI.
+- [x] Keep macOS CI.
 
 ## Exit gate
 
@@ -559,6 +559,7 @@ Coding agents should update only the status field/check boxes, not rewrite compl
 |---|---|---|---|
 | M0 | COMPLETE | passed | Exact baseline macOS CI passed 159 Python + 7 JS tests; Windows baseline failures documented; architecture/API inventories added. |
 | M1 | COMPLETE | passed | `adcc/` 包提取 config/ports/processes/lifecycle/tasks 策略，`server.py` 减 611 行改为兼容入口委托（ADR-0001）；25 项新单测 + 58 项可移植测试在 Windows 本地通过，macOS 专属回归（fcntl/ps/lsof、159 全量 CI）待 macOS CI 运行确认；发行 allowlist/语法检查/发行测试已覆盖 `adcc/`。 |
+| M2 | COMPLETE* | passed on Windows | PlatformAdapter（macos/windows/unsupported，ADR-0002）；Windows 上 `python server.py` 可导入运行，受管服务启停/端口发现/身份识别/外部进程安全全部实测通过（145 项测试、40 项 macOS 专属跳过）；*待办：Windows+macOS CI 矩阵（fork Actions 被禁用，需启用后补充）；macOS parity 测试需 macOS CI 或 macOS 主机确认。 |
 | M2 | NOT STARTED | pending | |
 | M3 | NOT STARTED | pending | |
 | M4 | NOT STARTED | pending | |

@@ -61,6 +61,47 @@ def parse_lsof_listeners(output):
     return found
 
 
+def parse_netstat_listeners(output):
+    """Parse ``netstat -ano`` output into the legacy listener snapshot.
+
+    Windows `netstat` reports TCP/UDP entries with ``Proto Local Foreign
+    State PID`` columns; only LISTENING TCP rows are kept.  ``0.0.0.0`` is
+    normalised to ``*`` so the resulting ``{(pid, port): {bind_host}}``
+    mapping matches the lsof shape consumed by ``listener_open_host``.
+    """
+    found = {}
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) < 5 or parts[0] != "TCP":
+            continue
+        if parts[-2] != "LISTENING":
+            continue
+        try:
+            pid = int(parts[-1])
+        except ValueError:
+            continue
+        local = parts[1]
+        port = None
+        bind_host = None
+        if local.startswith("["):
+            bracket, _, rest = local.partition("]:")
+            bind_host, port_text = bracket[1:], rest
+        elif ":" in local:
+            bind_host, _, port_text = local.rpartition(":")
+        else:
+            continue
+        try:
+            port = int(port_text)
+        except ValueError:
+            continue
+        if not bind_host:
+            bind_host = "*"
+        elif bind_host == "0.0.0.0":
+            bind_host = "*"
+        found.setdefault((pid, port), set()).add(bind_host or "")
+    return found
+
+
 def listener_open_host(listeners, port, pids=None):
     """Return the loopback host appropriate for a listener snapshot.
 

@@ -8,7 +8,6 @@ API 契约与实现要点见 AGENTS.md。
 """
 
 import glob
-import fcntl
 import functools
 import errno
 import json
@@ -31,6 +30,11 @@ import webbrowser
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+try:
+    import fcntl  # macOS 单实例锁；Windows 由 PlatformAdapter 处理
+except ImportError:  # pragma: no cover - platform-specific
+    fcntl = None
+
 from adcc.core.constants import (
     CURRENT_SCHEMA_VERSION,
     DEFAULT_UI_THEME,
@@ -39,6 +43,7 @@ from adcc.core.constants import (
     TASK_CANCELED_EXIT_CODE,
 )
 from adcc.core.errors import ConfigSchemaError, FutureConfigSchemaError
+from adcc.platform import get_platform_adapter
 from adcc.runtime.lifecycle import (
     legacy_candidate_pids as core_legacy_candidate_pids,
     legacy_identity_applicable as core_legacy_identity_applicable,
@@ -46,6 +51,7 @@ from adcc.runtime.lifecycle import (
     listener_app_owners as core_listener_app_owners,
     managed_candidate_pids as core_managed_candidate_pids,
     managed_process_index as core_managed_process_index,
+    managed_process_index_windows as core_managed_process_index_windows,
 )
 from adcc.runtime.ports import (
     listener_open_host,
@@ -73,12 +79,21 @@ from adcc.storage.config import (
     migrate_config_v0_to_v1,
 )
 
+PLATFORM = get_platform_adapter()
+IS_MACOS = PLATFORM.name == "macos"
+IS_WINDOWS = PLATFORM.name == "windows"
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 VERSION_PATH = os.path.join(BASE_DIR, "VERSION")
 LEGACY_DATA_DIR = os.path.join(BASE_DIR, "data")
-DEFAULT_DATA_DIR = os.path.expanduser(
-    "~/Library/Application Support/总控台")
-DEFAULT_LOGS_DIR = os.path.expanduser("~/Library/Logs/总控台")
+if IS_WINDOWS:
+    _app_support = os.environ.get("APPDATA") or os.path.expanduser("~")
+    DEFAULT_DATA_DIR = os.path.join(_app_support, "总控台")
+    DEFAULT_LOGS_DIR = os.path.join(_app_support, "总控台", "logs")
+else:
+    DEFAULT_DATA_DIR = os.path.expanduser(
+        "~/Library/Application Support/总控台")
+    DEFAULT_LOGS_DIR = os.path.expanduser("~/Library/Logs/总控台")
 
 
 def resolve_runtime_dir(name, default):
@@ -138,7 +153,8 @@ LOG_MAINTENANCE_SEC = 30
 STARTUP_PROBE_SEC = 0.25
 APP_STOP_TIMEOUT_SEC = 5.0
 SELF_PID = os.getpid()
-SELF_UID = os.getuid()
+SELF_UID = PLATFORM.current_user_id()
+SIGKILL = getattr(signal, "SIGKILL", 9)  # Windows 的 signal 模块无 SIGKILL
 ICON_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".ico")
 LOG = logging.getLogger("console")
 LOG_LOCK = threading.RLock()
@@ -184,13 +200,9 @@ APP_ROUTE_RE = re.compile(
 def _ensure_private_dir(path):
     if os.path.islink(path):
         raise OSError("私有运行目录不能是符号链接: %s" % path)
-    os.makedirs(path, mode=0o700, exist_ok=True)
+    PLATFORM.ensure_private_dir(path)
     if os.path.islink(path) or not os.path.isdir(path):
         raise OSError("私有运行路径不是安全目录: %s" % path)
-    try:
-        os.chmod(path, 0o700)
-    except OSError:
-        LOG.warning("无法收紧目录权限: %s", path)
 
 
 def _copy_private_regular_file(source, target):
@@ -329,13 +341,13 @@ def prepare_runtime_storage():
 
 
 def write_private_bytes(path, payload):
-    """以 0600 权限写入用户数据文件。"""
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    """以 0600 权限写入用户数据文件（Windows 上权限为尽力而为）。"""
+    fd = PLATFORM.open_private(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "wb") as f:
         f.write(payload)
         f.flush()
         os.fsync(f.fileno())
-    os.chmod(path, 0o600)
+    PLATFORM.chmod_private(path, 0o600)
 
 
 # ---------------------------------------------------------------- 配置
@@ -357,41 +369,15 @@ def acquire_instance_lock(path=INSTANCE_LOCK_PATH):
     """Acquire the per-project process lock and keep its file object alive.
 
     Port fallback alone is not a single-instance guarantee: two servers on
-    :9600/:9601 would still update the same config.  flock ties exclusivity to
-    this data directory and is released automatically if the process crashes.
+    :9600/:9601 would still update the same config.  The lock ties
+    exclusivity to this data directory and is released automatically if the
+    process crashes (macOS flock / Windows byte-range lock).
     """
-    directory = os.path.dirname(path) or "."
-    os.makedirs(directory, mode=0o700, exist_ok=True)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
-    lock_file = os.fdopen(fd, "r+", encoding="ascii")
-    try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError as e:
-        lock_file.close()
-        if e.errno in (errno.EACCES, errno.EAGAIN):
-            return None
-        raise
-    try:
-        os.fchmod(lock_file.fileno(), 0o600)
-        lock_file.seek(0)
-        lock_file.truncate()
-        lock_file.write("%d\n" % SELF_PID)
-        lock_file.flush()
-        os.fsync(lock_file.fileno())
-    except OSError:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-        lock_file.close()
-        raise
-    return lock_file
+    return PLATFORM.acquire_lock(path)
 
 
 def release_instance_lock(lock_file):
-    if lock_file is None:
-        return
-    try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-    finally:
-        lock_file.close()
+    PLATFORM.release_lock(lock_file)
 
 
 # ---------------------------------------------------------------- 子进程与解析
@@ -413,62 +399,32 @@ def scan_listeners():
     字典仍可像旧集合一样迭代/判断 ``(pid, port)``，同时保留监听地址，
     供前端区分仅监听 ``::1`` 的服务（需通过 localhost 打开）。
     """
-    output = run_cmd(["lsof", "-iTCP", "-sTCP:LISTEN", "-P", "-n"])
-    return parse_lsof_listeners(output)
+    return PLATFORM.listeners()
 
 
 def ps_snapshot(pids=None, with_uid=True):
     """批量进程信息 → {pid: {"uid","comm","args","cpu","mem","etime"}}。
 
-    pids=None 表示全部进程（ps -ax）。解析：左边固定列 pid[/uid]/etime/cpu/mem，
-    其余部分（可含空格）即 comm；args 单独一次 ps 取。
-    注意：不能用 `comm=` 抑制表头——macOS ps 会把空表头列压到 16 字节截断
-    内容；保留表头后解析时跳过表头行即可（首列非数字的行）。
+    pids=None 表示全部进程。采集与解析由 PlatformAdapter 负责
+    （macOS: ps；Windows: CIM），返回结构与旧 ps 解析完全一致。
     """
-    base = ["ps"]
-    if pids is None:
-        base.append("-ax")
-    else:
-        pids = [int(p) for p in pids]
-        if not pids:
-            return {}
-        base += ["-p", ",".join(str(p) for p in pids)]
-    # comm 必须放在最后一列：macOS ps 只保证最后一列不被定宽截断
-    # （comm 在中间列时会被压成约 16 字节，长路径被砍断）。
-    fields = ["pid"] + (["uid"] if with_uid else []) + \
-             ["etime", "%cpu", "%mem", "comm"]
-    out1 = run_cmd(base + ["-o", ",".join(fields)])
-    out2 = run_cmd(base + ["-o", "pid,args"])
-
-    return parse_ps_snapshot(out1, out2, with_uid=with_uid)
+    return PLATFORM.process_snapshot(pids, with_uid=with_uid)
 
 
 def lsof_cwds(pids):
-    """lsof -a -p <pids> -d cwd -Fn → {pid: cwd}。"""
-    pids = [int(p) for p in pids]
-    if not pids:
-        return {}
-    out = run_cmd(["lsof", "-a", "-p", ",".join(str(p) for p in pids),
-                   "-d", "cwd", "-Fn"])
-    return parse_lsof_cwds(out)
+    """进程工作目录 → {pid: cwd}（Windows 不可得时返回 {}）。"""
+    return PLATFORM.process_cwds(pids)
 
 
 def pid_alive(pid):
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except PermissionError:
-        return True
-    except (OSError, ValueError, TypeError):
-        return False
+    return PLATFORM.pid_alive(pid)
 
 
 # ---------------------------------------------------------------- 状态构建
 
 def origin_snapshot():
-    """ps -axo pid=,ppid=,args → {pid: (ppid, args)}，供来源溯源。"""
-    output = run_cmd(["ps", "-axo", "pid=,ppid=,args"])
-    return parse_origin_snapshot(output)
+    """进程溯源表 → {pid: (ppid, args)}，供来源溯源。"""
+    return PLATFORM.origin_snapshot()
 
 
 def build_services(cfg, groups=None):
@@ -560,19 +516,24 @@ def build_watched(keywords):
 
 
 def pgid_members_map():
-    """ps -axo pid=,pgid= → {pgid: [pid, ...]}。
-    进程退出后其子孙仍保留原 pgid（被 launchd 收养也不变），
-    因此按 pgid 能找到「脚本把服务放后台后自己退出」的存活成员。"""
-    output = run_cmd(["ps", "-axo", "pid=,pgid="])
-    return parse_pgid_members(output)
+    """进程组 → {pgid: [pid, ...]}。
+
+    macOS 由 ps 采集；Windows 无进程组语义，由 adapter 返回空表，
+    受管身份走 PID + token + 进程树通道。
+    """
+    return PLATFORM.group_members_map()
 
 
 def managed_process_index(apps, groups=None):
     """批量校验应用的受控进程，返回 (appId -> [pid], ps, groups)。
 
-    必须同时满足：属于记录的进程组、属于当前用户、argv 中带本次启动的
-    随机 token。即使 PID/PGID 被系统复用，也不会把无关进程当成应用或停止它。
+    macOS：属于记录的进程组、属于当前用户、argv 中带本次启动的随机 token
+    三者同时满足才算受控；Windows：lastPid 存活 + 当前用户 + 命令行携带
+    token 标记的 cmd 包装进程及其后代树。即使 PID 被系统复用，也不会把
+    无关进程当成应用或停止它。
     """
+    if IS_WINDOWS:
+        return _managed_process_index_windows(apps, groups)
     if groups is None:
         needs_groups = any(
             app.get("runToken")
@@ -591,6 +552,29 @@ def managed_process_index(apps, groups=None):
         run_token_arg_prefix=RUN_TOKEN_ARG_PREFIX,
     )
     return result, snap, groups
+
+
+def _managed_process_index_windows(apps, groups=None):
+    """Windows 受管身份：cmd 包装进程带 token 标记，后代树并入受管集。"""
+    controllers = {}
+    for app in apps:
+        token = app.get("runToken")
+        pid = app.get("lastPid")
+        if (isinstance(token, str) and token
+                and isinstance(pid, int) and pid > 0):
+            controllers[app.get("id")] = pid
+    if not controllers:
+        return {}, {}, {}
+    snap = ps_snapshot(list(controllers.values()), with_uid=True)
+    origin = origin_snapshot()
+    result = core_managed_process_index_windows(
+        apps,
+        snap,
+        origin,
+        current_user=SELF_UID,
+        run_token_env_marker=RUN_TOKEN_ENV + "=",
+    )
+    return result, snap, {}
 
 
 def managed_pids(app, groups=None):
@@ -845,7 +829,8 @@ def build_health(cfg):
         else:
             try:
                 mode = os.lstat(path).st_mode
-                if stat.S_ISLNK(mode) or mode & 0o077:
+                # Windows 无 POSIX 权限位，跳过 0700 位检查
+                if not IS_WINDOWS and (stat.S_ISLNK(mode) or mode & 0o077):
                     issues.append("%s 目录权限不是 0700" % label)
             except OSError as e:
                 issues.append("无法检查 %s 目录: %s" % (label, e))
@@ -860,7 +845,9 @@ def build_health(cfg):
         except OSError as e:
             issues.append("无法检查 %s: %s" % (label, e))
             continue
-        if not stat.S_ISREG(mode) or mode & 0o077:
+        if not stat.S_ISREG(mode):
+            issues.append("%s 不是普通文件" % label)
+        elif not IS_WINDOWS and mode & 0o077:
             issues.append("%s 文件权限不是 0600" % label)
     degraded = bool(issues)
     snapshot = cfg.snapshot()
@@ -910,15 +897,8 @@ def list_themes():
 # ---------------------------------------------------------------- 进程/应用操作
 
 def process_uid(pid):
-    """返回进程 uid；进程不存在返回 None。"""
-    out = run_cmd(["ps", "-o", "uid=", "-p", str(int(pid))])
-    toks = out.split()
-    if not toks:
-        return None
-    try:
-        return int(toks[0])
-    except ValueError:
-        return None
+    """返回进程用户标识（macOS 为 uid，Windows 为用户名）；不存在返回 None。"""
+    return PLATFORM.process_user_id(pid)
 
 
 def kill_process(pid, force):
@@ -930,35 +910,20 @@ def kill_process(pid, force):
         return False, "进程不存在"
     if uid != SELF_UID:
         return False, "只能结束当前用户的进程"
-    sig = signal.SIGKILL if force else signal.SIGTERM
-    try:
-        os.kill(pid, sig)
-    except ProcessLookupError:
-        return False, "进程不存在"
-    except PermissionError:
-        return False, "没有权限结束该进程"
-    except OSError as e:
-        return False, "结束失败: %s" % e
-    return True, None
+    return PLATFORM.kill_process(pid, force)
 
 
 def stop_pid_tree(pid, sig=signal.SIGTERM):
-    """向受控进程组发信号；返回 (ok, error)。
+    """停止受控进程树：macOS 对进程组发信号；Windows 走 taskkill /T。
 
     ProcessLookupError means the target completed between validation and the
     signal and is therefore an idempotent success. Permission and other OS
     failures must never be swallowed: callers use them to retain management
     identity instead of creating an orphan process.
     """
-    try:
-        os.killpg(int(pid), sig)
-        return True, None
-    except ProcessLookupError:
-        return True, None
-    except PermissionError:
-        return False, "没有权限停止受控进程组"
-    except OSError as e:
-        return False, "停止受控进程组失败: %s" % e
+    if IS_WINDOWS:
+        return PLATFORM.terminate_tree(pid, force=(sig == SIGKILL))
+    return PLATFORM.signal_group(pid, sig)
 
 
 def app_running(app, listeners=None):
@@ -973,34 +938,10 @@ def app_alive_sign(app, listeners=None):
 def build_launch_env(token, environ=None):
     """构建无 Terminal 启动时仍可找到常见开发工具的环境。
 
-    Finder/LSUIElement 启动的应用通常只有系统 PATH，不会读取用户 shell 配置；
-    因此显式补入 Homebrew、npm/pnpm、Volta、NVM、fnm 等常见目录。
+    macOS 补入 Homebrew、npm/pnpm、Volta、NVM、fnm 等目录；Windows 继承
+    当前 PATH。均由 PlatformAdapter 实现。
     """
-    env = dict(os.environ if environ is None else environ)
-    home = os.path.expanduser("~")
-    preferred = [
-        os.path.join(home, ".local", "bin"),
-        os.path.join(home, ".volta", "bin"),
-        os.path.join(home, ".bun", "bin"),
-        os.path.join(home, "Library", "pnpm"),
-        os.path.join(home, ".asdf", "shims"),
-        "/opt/homebrew/bin", "/opt/homebrew/sbin",
-        "/usr/local/bin", "/usr/local/sbin",
-    ]
-    preferred.extend(sorted(
-        glob.glob(os.path.join(home, ".nvm", "versions", "node", "*", "bin")),
-        reverse=True))
-    preferred.extend(sorted(
-        glob.glob(os.path.join(home, ".fnm", "node-versions", "*", "installation", "bin")),
-        reverse=True))
-    preferred.extend((env.get("PATH") or "").split(os.pathsep))
-    preferred.extend(("/usr/bin", "/bin", "/usr/sbin", "/sbin"))
-    seen = set()
-    env["PATH"] = os.pathsep.join(
-        path for path in preferred if path and not (path in seen or seen.add(path)))
-    env.setdefault("PNPM_HOME", os.path.join(home, "Library", "pnpm"))
-    env[RUN_TOKEN_ENV] = token
-    return env
+    return PLATFORM.launch_env(token, environ)
 
 
 def start_app(app):
@@ -1010,32 +951,22 @@ def start_app(app):
     rotate_log_file(log_path)
     cwd = app.get("cwd") or os.path.expanduser("~")
     try:
-        log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-                         0o600)
-        os.fchmod(log_fd, 0o600)
+        log_fd = PLATFORM.open_private(
+            log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         logf = os.fdopen(log_fd, "ab", buffering=0)
     except OSError as e:
         return False, "无法打开日志文件: %s" % e, None, None, None
     token = secrets.token_urlsafe(24)
     env = build_launch_env(token)
-    marker = RUN_TOKEN_ARG_PREFIX + token
-    # 外层 shell 在 argv[0] 中持有随机标记并等待内层；内层等待用户命令
-    # 留下的后台作业。因此进程组既可验证，也不会因启动脚本过早退出而失去锚点。
-    outer_script = '/bin/bash -c "$1"\nconsole_status=$?\nexit "$console_status"'
-    inner_script = (app["command"] +
-                    '\nconsole_status=$?\nwait\nexit "$console_status"')
     try:
         header = "\n===== 启动于 %s =====\n" % time.strftime("%Y-%m-%d %H:%M:%S")
         logf.write(header.encode("utf-8"))
-        proc = subprocess.Popen(
-            ["/bin/bash", "-c", outer_script, marker, inner_script],
-            cwd=cwd, stdout=logf, stderr=subprocess.STDOUT,
-            start_new_session=True, env=env)
+        proc, group_id = PLATFORM.start_process(cwd, env, logf, app["command"], token)
     except Exception as e:
         logf.close()
         return False, "启动失败: %s" % e, None, None, None
     logf.close()  # 子进程已持有副本，父进程关闭避免 fd 泄漏
-    return True, None, proc, proc.pid, token
+    return True, None, proc, group_id, token
 
 
 def startup_failure_message(app_id, code):
@@ -1134,24 +1065,19 @@ def stop_app_for_update(cfg, app, timeout=5.0):
 
 
 def pick_path(what):
-    """macOS 原生文件/目录选择框（osascript）。返回 (path|None, canceled)。"""
-    if what == "dir":
-        script = 'POSIX path of (choose folder with prompt "选择工作目录")'
-    else:
-        script = 'POSIX path of (choose file with prompt "选择批处理脚本")'
-    try:
-        r = subprocess.run(["osascript", "-e", script],
-                           capture_output=True, text=True, timeout=180)
-    except Exception:
-        return None, False
-    if r.returncode != 0:  # 用户按了取消（"User canceled."）
-        return None, True
-    return r.stdout.strip().rstrip("/") or None, False
+    """原生文件/目录选择框（macOS osascript / Windows WinForms）。"""
+    return PLATFORM.choose_path(what)
 
 
 def command_for_script(path):
-    """按脚本类型生成可直接保存的 shell 命令，并安全引用任意文件名。"""
+    """按脚本类型生成可直接保存的 shell 命令，并安全引用任意文件名。
+
+    macOS 生成 bash 风格命令；Windows 生成 cmd.exe 可执行的语法
+    （cmd 用双引号引用路径，无 POSIX 引号转义）。
+    """
     normalized = os.path.abspath(os.path.expanduser(str(path)))
+    if IS_WINDOWS:
+        return _command_for_script_windows(normalized)
     quoted = shlex.quote(normalized)
     suffix = os.path.splitext(normalized)[1].lower()
     if suffix == ".py":
@@ -1164,6 +1090,25 @@ def command_for_script(path):
         return quoted
     # .command 常见于 Finder 双击脚本；没有执行位时仍可明确交给 bash。
     return "/bin/bash -- %s" % quoted
+
+
+def _command_for_script_windows(path):
+    quoted = '"%s"' % path.replace('"', '""')
+    suffix = os.path.splitext(path)[1].lower()
+    if suffix == ".py":
+        return "python %s" % quoted
+    if suffix == ".ps1":
+        return "powershell -NoProfile -ExecutionPolicy Bypass -File %s" % quoted
+    if suffix in (".bat", ".cmd"):
+        return quoted
+    return quoted
+
+
+def _python_cmd(module_mode=True):
+    """候选命令里的 Python 前缀（macOS: python3；Windows: python）。"""
+    if IS_WINDOWS:
+        return "python -m" if module_mode else "python"
+    return "python3 -m" if module_mode else "python3"
 
 
 SCRIPT_SUFFIXES = {".py", ".sh", ".bash", ".zsh", ".command"}
@@ -1527,12 +1472,12 @@ def detect_project(root):
     if requirements is not None:
         note_file("requirements.txt", requirements)
     py_deps = "\n".join(text for text in (pyproject, requirements) if text).lower()
-    python_runner = "uv run" if os.path.isfile(os.path.join(root, "uv.lock")) else "python3 -m"
+    python_runner = "uv run" if os.path.isfile(os.path.join(root, "uv.lock")) else _python_cmd(True)
     if os.path.isfile(os.path.join(root, "uv.lock")):
         note_file("uv.lock")
     if os.path.isfile(os.path.join(root, "manage.py")):
         note_file("manage.py")
-        prefix = "uv run python" if python_runner == "uv run" else "python3"
+        prefix = "uv run python" if python_runner == "uv run" else _python_cmd(False)
         add(prefix + " manage.py runserver", "Django 开发服务器", "manage.py", 8000, 20)
     else:
         for module_file in ("app.py", "main.py", "server.py"):
@@ -1548,19 +1493,19 @@ def detect_project(root):
                 r"(?m)^\s*(?:import\s+flask\b|from\s+flask\b)", module_text)
             if "streamlit" in py_deps or imports_streamlit:
                 note_file(module_file, module_text)
-                prefix = "uv run" if python_runner == "uv run" else "python3 -m"
+                prefix = "uv run" if python_runner == "uv run" else _python_cmd(True)
                 add(prefix + " streamlit run " + module_file,
                     "Streamlit 应用", module_file, 8501, 22)
                 break
             if "fastapi" in py_deps or imports_fastapi:
                 note_file(module_file, module_text)
-                prefix = "uv run" if python_runner == "uv run" else "python3 -m"
+                prefix = "uv run" if python_runner == "uv run" else _python_cmd(True)
                 add(prefix + " uvicorn %s:app --reload" % module,
                     "FastAPI 开发服务器", module_file, 8000, 23)
                 break
             if "flask" in py_deps or imports_flask:
                 note_file(module_file, module_text)
-                prefix = "uv run" if python_runner == "uv run" else "python3 -m"
+                prefix = "uv run" if python_runner == "uv run" else _python_cmd(True)
                 add(prefix + " flask --app %s run --debug" % module,
                     "Flask 开发服务器", module_file, 5000, 24)
                 break
@@ -1596,7 +1541,7 @@ def detect_project(root):
     # 纯静态站点最后兜底，避免把 Vite/Next 等项目误当成普通文件目录。
     if not candidates and os.path.isfile(os.path.join(root, "index.html")):
         note_file("index.html")
-        add("python3 -m http.server 8000", "静态网站预览", "index.html", 8000, 90)
+        add(_python_cmd(True) + " http.server 8000", "静态网站预览", "index.html", 8000, 90)
 
     candidates.sort(key=lambda item: item.pop("_priority"))
     return {
@@ -1627,18 +1572,26 @@ def resolve_app_stop_target(app, listeners=None):
     """Resolve and validate a stop target before any signal is sent."""
     current = managed_pids(app)
     if current:
+        if IS_WINDOWS:
+            # Windows 无进程组语义：以 token 校验通过的 cmd 控制器为目标，
+            # 由 adapter 的 taskkill /T 树停止语义覆盖全部后代。
+            controller = app.get("lastPid")
+            if not (isinstance(controller, int) and controller in current):
+                controller = current[0]
+            return {"kind": "tree", "id": controller,
+                    "members": list(current)}, None
         pgid = app.get("lastPgid") or app.get("lastPid")
         if isinstance(pgid, int) and pgid > 0:
             return {"kind": "group", "id": pgid, "members": list(current)}, None
         return None, "受控进程组信息无效"
     legacy_pid = legacy_managed_pid(app, listeners)
     if legacy_pid:
-        if app.get("attached"):
+        if app.get("attached") and not IS_WINDOWS:
             try:
-                pgid = os.getpgid(legacy_pid)
-            except (ProcessLookupError, PermissionError, OSError):
+                pgid = PLATFORM.pid_group(legacy_pid)
+            except Exception:
                 pgid = None
-            if isinstance(pgid, int) and pgid > 0 and pgid != os.getpgrp():
+            if isinstance(pgid, int) and pgid > 0 and pgid != PLATFORM.current_pgrp():
                 members = _current_user_group_members(pgid)
                 member_cwds = lsof_cwds(members)
                 expected_cwd = app.get("cwd")
@@ -1665,40 +1618,20 @@ def signal_app_stop(target, sig=signal.SIGTERM):
     """Signal a target returned by resolve_app_stop_target."""
     ident = target["id"]
     if target["kind"] == "group":
-        return stop_pid_tree(ident, sig)
-    try:
-        os.kill(ident, sig)
-        return True, None
-    except ProcessLookupError:
-        return True, None
-    except PermissionError:
-        return False, "没有权限停止受控进程"
-    except OSError as e:
-        return False, "停止受控进程失败: %s" % e
+        return PLATFORM.signal_group(ident, sig)
+    if target["kind"] == "tree":
+        return PLATFORM.terminate_tree(ident, force=(sig == SIGKILL))
+    return PLATFORM.signal_pid(ident, sig)
 
 
 def stop_target_alive(target, expected_uid=None):
     if target["kind"] == "group":
-        try:
-            os.killpg(target["id"], 0)
-            return True
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        except OSError:
-            return True
-    try:
-        os.kill(target["id"], 0)
+        return PLATFORM.group_alive(target["id"])
+    if PLATFORM.pid_alive(target["id"]):
         if expected_uid is None:
             expected_uid = process_uid(target["id"])
         return expected_uid == SELF_UID
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return True
+    return False
 
 
 def stop_app_and_wait(app, timeout=APP_STOP_TIMEOUT_SEC, listeners=None):
@@ -1721,7 +1654,7 @@ def stop_app_and_wait(app, timeout=APP_STOP_TIMEOUT_SEC, listeners=None):
                     else None)
     while stop_target_alive(target, expected_uid):
         if time.monotonic() >= deadline:
-            remaining = (target["members"] if target["kind"] == "pid"
+            remaining = (target["members"] if target["kind"] in ("pid", "tree")
                          else _current_user_group_members(target["id"]))
             suffix = "（PID %s）" % "、".join(str(p) for p in remaining) if remaining else ""
             return False, "应用未在 %.1f 秒内退出%s，仍保留管理状态" % (timeout, suffix)
@@ -3332,29 +3265,12 @@ def find_console_instances():
 
 
 def _launcher_dialog(message):
-    script = """on run argv
-set messageText to item 1 of argv
-display dialog messageText with title "总控台" buttons {"取消", "重新启动", "打开控制台"} default button "打开控制台" cancel button "取消" with icon note
-return button returned of result
-end run"""
-    try:
-        result = subprocess.run(
-            ["osascript", "-e", script, message], capture_output=True,
-            text=True, timeout=180)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return result.stdout.strip() if result.returncode == 0 else None
+    return PLATFORM.show_dialog(
+        "总控台", message, ["取消", "重新启动", "打开控制台"], default_index=2)
 
 
 def _launcher_alert(message):
-    script = """on run argv
-display alert "总控台" message (item 1 of argv) as critical
-end run"""
-    try:
-        subprocess.run(["osascript", "-e", script, message],
-                       capture_output=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+    PLATFORM.show_alert("总控台", message)
 
 
 def launcher_main():
@@ -3388,10 +3304,7 @@ def launcher_main():
     targets = [item["pid"] for item in instances]
     for pid in targets:
         if process_uid(pid) == SELF_UID:
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+            PLATFORM.signal_pid(pid, signal.SIGTERM)
     deadline = time.monotonic() + 8.0
     while time.monotonic() < deadline and any(pid_alive(pid) for pid in targets):
         time.sleep(0.1)
@@ -3430,7 +3343,11 @@ def schedule_console_stop(server):
 
 
 def restart_helper(old_pid, preferred_port):
-    """等旧进程释放端口后，在 helper 原地 exec 新总控台。"""
+    """等旧进程释放端口后，拉起新总控台（macOS 原地 exec）。
+
+    Windows 不支持 ``os.execv``，改由 helper 以独立子进程方式启动新实例，
+    完成后 helper 正常退出。
+    """
     deadline = time.monotonic() + 12.0
     while time.monotonic() < deadline and pid_alive(old_pid):
         time.sleep(0.1)
@@ -3438,6 +3355,13 @@ def restart_helper(old_pid, preferred_port):
         return 1
     args = [sys.executable, os.path.abspath(__file__),
             "--preferred-port", str(int(preferred_port)), "--no-browser"]
+    if IS_WINDOWS:
+        try:
+            subprocess.Popen(args, cwd=BASE_DIR, close_fds=True,
+                             creationflags=0x08000000)  # CREATE_NO_WINDOW
+        except OSError:
+            return 3
+        return 0
     os.execv(sys.executable, args)
     return 0
 
@@ -3483,9 +3407,8 @@ def _run_console(preferred_port=None, open_browser=True):
 def redirect_console_output():
     """在运行目录迁移完成后，将 .app 输出安全追加到 Library Logs。"""
     path = os.path.join(LOGS_DIR, "console.log")
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    fd = PLATFORM.open_private(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
-        os.fchmod(fd, 0o600)
         for stream in (sys.stdout, sys.stderr):
             try:
                 stream.flush()

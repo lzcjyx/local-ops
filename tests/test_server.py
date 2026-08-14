@@ -12,7 +12,14 @@ from unittest import mock
 
 import server
 
+# M2: 下列类依赖 macOS 专属语义（BSD ps/lsof 文本、PGID/信号、bash
+# 脚本、X_OK 执行位、uid 数值），在 Windows 上跳过；其守卫由 macOS CI 承担。
+MACOS_ONLY = unittest.skipUnless(
+    sys.platform == "darwin",
+    "macOS 专属：依赖 ps/lsof 文本、进程组/信号语义或 bash 脚本")
 
+
+@MACOS_ONLY
 class ParsingTests(unittest.TestCase):
     def test_parse_etime(self):
         self.assertEqual(server.parse_etime("02:03"), 123)
@@ -127,6 +134,7 @@ class OriginAttributionTests(unittest.TestCase):
         self.assertEqual(origin, {"label": "Claude Code", "icon": "bot"})
 
 
+@MACOS_ONLY
 class ScriptCommandTests(unittest.TestCase):
     def test_script_extensions_choose_the_expected_runtime_and_quote_paths(self):
         cases = {
@@ -164,6 +172,7 @@ class ScriptCommandTests(unittest.TestCase):
                 ["/bin/bash", "--", path])
 
 
+@MACOS_ONLY
 class AppHealthTests(unittest.TestCase):
     def test_python_script_with_spaces_is_checked_without_running_it(self):
         with tempfile.TemporaryDirectory() as td:
@@ -300,11 +309,13 @@ class ProjectDetectionTests(unittest.TestCase):
             static, static_error = server.detect_project(static_dir)
 
         self.assertIsNone(django_error)
-        self.assertEqual(django["candidates"][0]["command"], "python3 manage.py runserver")
+        python = "python" if sys.platform.startswith("win") else "python3"
+        self.assertEqual(django["candidates"][0]["command"],
+                         "%s manage.py runserver" % python)
         self.assertEqual(django["candidates"][0]["port"], 8000)
         self.assertIsNone(static_error)
         self.assertEqual(static["candidates"][0]["command"],
-                         "python3 -m http.server 8000")
+                         "%s -m http.server 8000" % python)
 
     def test_invalid_folder_returns_a_clear_error(self):
         result, error = server.detect_project("/path/that/does/not/exist")
@@ -374,9 +385,10 @@ class ConfigTests(unittest.TestCase):
                 backup = json.load(f)
             self.assertEqual(current["watchedKeywords"], ["node", "ffmpeg"])
             self.assertEqual(backup["watchedKeywords"], ["node"])
-            self.assertEqual(oct(os.stat(path).st_mode & 0o777), "0o600")
-            self.assertEqual(oct(os.stat(path + ".bak").st_mode & 0o777),
-                             "0o600")
+            if sys.platform != "win32":  # Windows 无 POSIX 权限位
+                self.assertEqual(oct(os.stat(path).st_mode & 0o777), "0o600")
+                self.assertEqual(oct(os.stat(path + ".bak").st_mode & 0o777),
+                                 "0o600")
 
     def test_load_falls_back_to_backup(self):
         with tempfile.TemporaryDirectory() as td:
@@ -483,10 +495,11 @@ class RuntimeStorageTests(unittest.TestCase):
             with open(os.path.join(logs, "deadbeef.log"), "rb") as f:
                 self.assertEqual(f.read(), b"log")
             self.assertTrue(os.path.isfile(os.path.join(legacy, "config.json")))
-            self.assertEqual(oct(os.stat(target).st_mode & 0o777), "0o700")
-            self.assertEqual(
-                oct(os.stat(os.path.join(target, "config.json")).st_mode & 0o777),
-                "0o600")
+            if sys.platform != "win32":  # Windows 无 POSIX 权限位
+                self.assertEqual(oct(os.stat(target).st_mode & 0o777), "0o700")
+                self.assertEqual(
+                    oct(os.stat(os.path.join(target, "config.json")).st_mode & 0o777),
+                    "0o600")
 
             # 已存在的目标绝不被旧项目目录二次覆盖。
             with open(os.path.join(legacy, "config.json"), "w",
@@ -572,10 +585,13 @@ class RuntimeStorageTests(unittest.TestCase):
             self.assertEqual(result.stdout, "")
             log_path = os.path.join(logs, "console.log")
             with open(log_path, encoding="utf-8") as f:
-                self.assertEqual(f.read(), "launcher-log-ready\n")
-            self.assertEqual(os.stat(log_path).st_mode & 0o777, 0o600)
+                # Windows CRT 重定向可能追加一个尾随换行，容忍空白差异
+                self.assertEqual(f.read().strip(), "launcher-log-ready")
+            if sys.platform != "win32":
+                self.assertEqual(os.stat(log_path).st_mode & 0o777, 0o600)
 
 
+@MACOS_ONLY
 class ProcessIdentityTests(unittest.TestCase):
     def test_random_marker_is_required_for_whole_process_group(self):
         app = {"id": "a", "lastPid": 42, "lastPgid": 42, "runToken": "right"}
@@ -804,6 +820,7 @@ class ProcessIdentityTests(unittest.TestCase):
         self.assertIsNone(apps["feedface"]["lastExit"])
 
 
+@MACOS_ONLY
 class LaunchEnvironmentTests(unittest.TestCase):
     def test_headless_launch_path_includes_common_user_node_locations(self):
         with mock.patch.object(server.os.path, "expanduser", return_value="/Users/example"), \
@@ -965,6 +982,8 @@ class StateTests(unittest.TestCase):
         self.assertEqual(row["lastExit"]["status"], "succeeded")
         self.assertNotIn("status", task["lastExit"])
 
+    @unittest.skipUnless(sys.platform == "darwin",
+                         "macOS 专属：uid 数值语义")
     def test_watched_processes_are_current_user_only(self):
         snap = {
             10: {"uid": server.SELF_UID, "comm": "ffmpeg",
@@ -1037,6 +1056,7 @@ class IconTests(unittest.TestCase):
             "image/svg+xml"))
 
 
+@MACOS_ONLY
 class ConsoleRestartTests(unittest.TestCase):
     def test_instance_discovery_is_limited_to_same_project(self):
         snap = {
