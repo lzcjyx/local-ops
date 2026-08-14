@@ -143,7 +143,7 @@ docs/architecture/API_BASELINE.md
 
 ### CI
 
-- [ ] Add Windows to CI matrix for tests that are now portable.
+- [x] Add Windows to CI matrix for tests that are now portable.
 - [x] Keep macOS CI.
 
 ## Exit gate
@@ -559,7 +559,7 @@ Coding agents should update only the status field/check boxes, not rewrite compl
 |---|---|---|---|
 | M0 | COMPLETE | passed | Exact baseline macOS CI passed 159 Python + 7 JS tests; Windows baseline failures documented; architecture/API inventories added. |
 | M1 | COMPLETE | passed | `adcc/` 包提取 config/ports/processes/lifecycle/tasks 策略，`server.py` 减 611 行改为兼容入口委托（ADR-0001）；25 项新单测 + 58 项可移植测试在 Windows 本地通过，macOS 专属回归（fcntl/ps/lsof、159 全量 CI）待 macOS CI 运行确认；发行 allowlist/语法检查/发行测试已覆盖 `adcc/`。 |
-| M2 | COMPLETE* | passed on Windows | PlatformAdapter（macos/windows/unsupported，ADR-0002）；Windows 上 `python server.py` 可导入运行，受管服务启停/端口发现/身份识别/外部进程安全全部实测通过（145 项测试、40 项 macOS 专属跳过）；*待办：Windows+macOS CI 矩阵（fork Actions 被禁用，需启用后补充）；macOS parity 测试需 macOS CI 或 macOS 主机确认。 |
+| M2 | COMPLETE | passed | PlatformAdapter（macos/windows/unsupported，ADR-0002）；Windows 本地启停/端口/身份/外部进程安全实测通过；CI 矩阵落地（macOS 审计 + Windows 可移植 202 测试）双平台全绿，M1/M2 macOS parity 一并确认（check + release 构建 + 可重复性验证通过）。 |
 | M2 | NOT STARTED | pending | |
 | M3 | NOT STARTED | pending | |
 | M4 | NOT STARTED | pending | |
