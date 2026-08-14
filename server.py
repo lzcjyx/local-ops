@@ -31,6 +31,48 @@ import webbrowser
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from adcc.core.constants import (
+    CURRENT_SCHEMA_VERSION,
+    DEFAULT_UI_THEME,
+    RUN_TOKEN_ARG_PREFIX,
+    RUN_TOKEN_ENV,
+    TASK_CANCELED_EXIT_CODE,
+)
+from adcc.core.errors import ConfigSchemaError, FutureConfigSchemaError
+from adcc.runtime.lifecycle import (
+    legacy_candidate_pids as core_legacy_candidate_pids,
+    legacy_identity_applicable as core_legacy_identity_applicable,
+    legacy_managed_pid as core_legacy_managed_pid,
+    listener_app_owners as core_listener_app_owners,
+    managed_candidate_pids as core_managed_candidate_pids,
+    managed_process_index as core_managed_process_index,
+)
+from adcc.runtime.ports import (
+    listener_open_host,
+    parse_lsof_listeners,
+    validate_port,
+)
+from adcc.runtime.processes import (
+    DEV_KEYWORDS,
+    HOME_DIR,
+    SYSTEM_PATH_PREFIXES,
+    attribute_origin,
+    classify_group,
+    parse_etime,
+    parse_lsof_cwds,
+    parse_origin_snapshot,
+    parse_pgid_members,
+    parse_ps_snapshot,
+    project_name,
+)
+from adcc.runtime.tasks import classify_task_exit, public_last_exit
+from adcc.storage.config import (
+    CONFIG_MIGRATIONS,
+    Config as CoreConfig,
+    migrate_config,
+    migrate_config_v0_to_v1,
+)
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 VERSION_PATH = os.path.join(BASE_DIR, "VERSION")
 LEGACY_DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -67,12 +109,6 @@ THEMES_DIR = os.path.join(STATIC_DIR, "themes")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 INSTANCE_LOCK_PATH = os.path.join(DATA_DIR, "console.lock")
 
-CURRENT_SCHEMA_VERSION = 1
-
-# 默认 UI 主题：新安装与无偏好回退均使用它，主题清单中固定排首位。
-DEFAULT_UI_THEME = "ops"
-
-
 def read_project_version(path=VERSION_PATH):
     """读取根目录 VERSION。失败时保持服务可诊断，但标记为降级。"""
     try:
@@ -101,10 +137,6 @@ LOG_BACKUPS = 3
 LOG_MAINTENANCE_SEC = 30
 STARTUP_PROBE_SEC = 0.25
 APP_STOP_TIMEOUT_SEC = 5.0
-RUN_TOKEN_ENV = "CONSOLE_RUN_TOKEN"
-RUN_TOKEN_ARG_PREFIX = "console-run:"
-TASK_CANCELED_EXIT_CODE = 130
-
 SELF_PID = os.getpid()
 SELF_UID = os.getuid()
 ICON_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".ico")
@@ -112,33 +144,6 @@ LOG = logging.getLogger("console")
 LOG_LOCK = threading.RLock()
 MANUAL_STOP_LOCK = threading.RLock()
 MANUAL_STOP_TOKENS = set()
-
-
-def classify_task_exit(code):
-    """把一次性任务的退出码归一为稳定的产品语义。"""
-    if code == 0:
-        return "succeeded"
-    if code == TASK_CANCELED_EXIT_CODE:
-        return "canceled"
-    return "failed"
-
-
-def public_last_exit(app):
-    """兼容旧配置：只在 API 输出时补齐任务状态，不改写磁盘。"""
-    value = app.get("lastExit")
-    if not isinstance(value, dict):
-        return value
-    result = dict(value)
-    if (app.get("kind") or "service") == "task":
-        # 旧版把“总控台按钮停止”记作 canceled + null；新协议中它是 stopped。
-        if result.get("status") == "canceled" and result.get("code") is None:
-            result["status"] = "stopped"
-        elif (result.get("status") not in
-              {"succeeded", "canceled", "failed", "stopped"}
-              and isinstance(result.get("code"), int)):
-            result["status"] = classify_task_exit(result["code"])
-    return result
-
 
 STATIC_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -336,203 +341,16 @@ def write_private_bytes(path, payload):
 # ---------------------------------------------------------------- 配置
 
 
-class ConfigSchemaError(ValueError):
-    pass
-
-
-class FutureConfigSchemaError(ConfigSchemaError):
-    pass
-
-
-def migrate_config_v0_to_v1(raw):
-    """旧配置没有 schemaVersion；v1 只建立显式版本基线。"""
-    migrated = dict(raw)
-    migrated["schemaVersion"] = 1
-    return migrated
-
-
-CONFIG_MIGRATIONS = {0: migrate_config_v0_to_v1}
-
-
-def migrate_config(raw):
-    """将任意已支持的旧 schema 逐版幂等迁移到当前版本。"""
-    if not isinstance(raw, dict):
-        raise ConfigSchemaError("配置根节点必须是 JSON 对象")
-    version = raw.get("schemaVersion", 0)
-    if type(version) is not int or version < 0:
-        raise ConfigSchemaError("schemaVersion 必须是非负整数")
-    if version > CURRENT_SCHEMA_VERSION:
-        raise FutureConfigSchemaError(
-            "配置 schemaVersion=%d 新于当前程序支持的 %d" %
-            (version, CURRENT_SCHEMA_VERSION))
-    source_version = version
-    migrated = json.loads(json.dumps(raw, ensure_ascii=False))
-    while version < CURRENT_SCHEMA_VERSION:
-        migration = CONFIG_MIGRATIONS.get(version)
-        if migration is None:
-            raise ConfigSchemaError("缺少 schemaVersion=%d 的迁移器" % version)
-        migrated = migration(migrated)
-        next_version = migrated.get("schemaVersion")
-        if next_version != version + 1:
-            raise ConfigSchemaError("配置迁移器未正确递增 schemaVersion")
-        version = next_version
-    return migrated, source_version
-
-
-class Config:
-    """配置读写：显式 schema 迁移 + 原子写 + 上一份良好备份。"""
-
-    DEFAULT = {"schemaVersion": CURRENT_SCHEMA_VERSION,
-               "apps": [], "hidden": [], "pinned": [], "promoted": [],
-               "watchedKeywords": [], "uiTheme": DEFAULT_UI_THEME}
-    APP_DEFAULT = {"id": None, "name": "", "command": "", "cwd": None,
-                   "port": None, "emoji": None, "glyph": None, "icon": None,
-                   "favicon": None, "kind": "service", "lastPid": None,
-                   "lastPgid": None, "runToken": None,
-                   "attached": False, "lastExit": None, "createdAt": 0}
+class Config(CoreConfig):
+    """Legacy entrypoint wired to the extracted configuration Module."""
 
     def __init__(self, path):
-        self._lock = threading.RLock()
-        self._path = path
-        self._writable = True
-        self._recovered_from_backup = False
-        self._migration_from = None
-        self._health_issues = []
-        self._data = self._load()
-
-    @staticmethod
-    def _payload(data):
-        return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
-
-    @classmethod
-    def _normalize(cls, raw):
-        data = {"schemaVersion": CURRENT_SCHEMA_VERSION}
-        for key, default in cls.DEFAULT.items():
-            if key == "schemaVersion":
-                continue
-            value = raw.get(key)
-            if isinstance(value, type(default)):
-                data[key] = (json.loads(json.dumps(value, ensure_ascii=False))
-                             if isinstance(value, (list, dict)) else value)
-            else:
-                data[key] = list(default) if isinstance(default, list) else default
-        apps = []
-        for item in data["apps"]:
-            if not isinstance(item, dict) or not item.get("id"):
-                continue
-            app = dict(cls.APP_DEFAULT)
-            for key in app:
-                if key in item:
-                    app[key] = item[key]
-            apps.append(app)
-        data["apps"] = apps
-        return data
-
-    def _load(self):
-        paths = (self._path, self._path + ".bak")
-        found_candidate = False
-        for index, path in enumerate(paths):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    raw = json.load(f)
-                migrated, source_version = migrate_config(raw)
-                data = self._normalize(migrated)
-                if index:
-                    self._recovered_from_backup = True
-                    LOG.warning("主配置不可读，已从备份恢复: %s", path)
-                if source_version < CURRENT_SCHEMA_VERSION:
-                    self._migration_from = source_version
-                self._persist_loaded_state(
-                    data, raw, source_index=index,
-                    source_version=source_version)
-                return data
-            except FileNotFoundError:
-                continue
-            except FutureConfigSchemaError as e:
-                # 回退到旧程序时绝不用旧 .bak 覆盖更新 schema 的主文件。
-                found_candidate = True
-                self._health_issues.append(str(e))
-                LOG.error("拒绝降级读取配置: %s", path)
-                break
-            except (OSError, UnicodeError, json.JSONDecodeError,
-                    ConfigSchemaError, TypeError, ValueError):
-                found_candidate = True
-                LOG.exception("读取配置失败: %s", path)
-        data = self._normalize(self.DEFAULT)
-        if found_candidate:
-            # 配置和备份都不可用时，展示空状态但禁止写入，
-            # 避免一次 UI 操作就把尚可人工恢复的文件覆盖。
-            self._writable = False
-            self._health_issues.append(
-                "主配置与备份均不可读，已进入只读保护状态")
-            return data
-        try:
-            self._write_atomic(self._path, self._payload(data))
-        except OSError as e:
-            self._writable = False
-            self._health_issues.append("无法创建配置文件: %s" % e)
-        return data
-
-    def _persist_loaded_state(self, data, raw, source_index, source_version):
-        """将已恢复/迁移的配置落回主文件，不破坏良好备份。"""
-        needs_migration = source_version < CURRENT_SCHEMA_VERSION
-        if not source_index and not needs_migration:
-            return
-        try:
-            if not source_index and needs_migration:
-                # 迁移前的配置是上一份良好版本。
-                self._write_atomic(self._path + ".bak", self._payload(raw))
-            # 从 .bak 恢复时只修复主文件，保留已验证的备份。
-            self._write_atomic(self._path, self._payload(data))
-        except OSError as e:
-            self._writable = False
-            self._health_issues.append("配置恢复/迁移落盘失败: %s" % e)
-            LOG.exception("配置恢复/迁移落盘失败")
-
-    def snapshot(self):
-        """返回配置的深拷贝（数据均为 JSON 可序列化）。"""
-        with self._lock:
-            return json.loads(json.dumps(self._data, ensure_ascii=False))
-
-    def health_info(self):
-        with self._lock:
-            return {
-                "writable": self._writable,
-                "recoveredFromBackup": self._recovered_from_backup,
-                "migratedFromSchema": self._migration_from,
-                "issues": list(self._health_issues),
-            }
-
-    def update(self, fn):
-        """在锁内执行 fn(self._data) 修改配置，随后原子落盘，返回 fn 的返回值。"""
-        with self._lock:
-            if not self._writable:
-                raise OSError("配置处于只读保护状态，请先恢复配置或权限")
-            previous = json.loads(json.dumps(self._data, ensure_ascii=False))
-            try:
-                result = fn(self._data)
-                payload = self._payload(self._data)
-                previous_payload = self._payload(previous)
-                # 先保存上一份良好内容，再替换主文件。
-                self._write_atomic(self._path + ".bak", previous_payload)
-                self._write_atomic(self._path, payload)
-                invalidate_state_cache()
-                return result
-            except Exception:
-                self._data = previous
-                raise
-
-    @staticmethod
-    def _write_atomic(path, payload):
-        _ensure_private_dir(os.path.dirname(path) or ".")
-        tmp = path + ".tmp"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(payload)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-        os.chmod(path, 0o600)
+        super().__init__(
+            path,
+            on_change=invalidate_state_cache,
+            logger=LOG,
+            ensure_private_dir=_ensure_private_dir,
+        )
 
 
 def acquire_instance_lock(path=INSTANCE_LOCK_PATH):
@@ -589,94 +407,14 @@ def run_cmd(args, timeout=SUBPROCESS_TIMEOUT):
         return ""
 
 
-def parse_etime(s):
-    """ps 的 etime：[[dd-]hh:]mm:ss → 秒。异常返回 0。"""
-    try:
-        s = s.strip()
-        days = 0
-        if "-" in s:
-            d, s = s.split("-", 1)
-            days = int(d)
-        parts = [int(p) for p in s.split(":")]
-        if len(parts) == 2:
-            hours, minutes, secs = 0, parts[0], parts[1]
-        elif len(parts) == 3:
-            hours, minutes, secs = parts
-        else:
-            return 0
-        return days * 86400 + hours * 3600 + minutes * 60 + secs
-    except Exception:
-        return 0
-
-
-def _to_float(tok, default=0.0):
-    try:
-        return float(tok)
-    except (TypeError, ValueError):
-        return default
-
-
 def scan_listeners():
     """lsof 监听快照 → {(pid, port): {bind_host, ...}}。
 
     字典仍可像旧集合一样迭代/判断 ``(pid, port)``，同时保留监听地址，
     供前端区分仅监听 ``::1`` 的服务（需通过 localhost 打开）。
     """
-    out = run_cmd(["lsof", "-iTCP", "-sTCP:LISTEN", "-P", "-n"])
-    found = {}
-    for line in out.splitlines():
-        if not line or line.startswith("COMMAND"):
-            continue
-        parts = line.split()
-        if len(parts) < 9:
-            continue
-        try:
-            pid = int(parts[1])
-        except ValueError:
-            continue
-        # NAME 列形如 *:8791 / 127.0.0.1:8080 / [::1]:8765，末尾可能跟 "(LISTEN)"
-        port = None
-        bind_host = None
-        for tok in reversed(parts):
-            m = re.search(r":(\d+)$", tok)
-            if m:
-                port = int(m.group(1))
-                bind_host = tok[:m.start()]
-                if bind_host.startswith("[") and bind_host.endswith("]"):
-                    bind_host = bind_host[1:-1]
-                break
-        if port is None:
-            continue
-        found.setdefault((pid, port), set()).add(bind_host or "")
-    return found
-
-
-def listener_open_host(listeners, port, pids=None):
-    """返回浏览器访问监听端口时应使用的本地主机名。
-
-    macOS 上有些开发服务器只绑定 IPv6 回环 ``::1``；这时
-    ``127.0.0.1`` 会直接拒绝连接，而 ``localhost`` 能正确解析到它。
-    对旧测试/旧调用传入的 set 快照则保持原来的 IPv4 默认值。
-    """
-    if not isinstance(listeners, dict):
-        return "127.0.0.1"
-    allowed_pids = set(pids) if pids is not None else None
-    hosts = set()
-    for (pid, listening_port), values in listeners.items():
-        if listening_port != port or (
-                allowed_pids is not None and pid not in allowed_pids):
-            continue
-        if isinstance(values, str):
-            hosts.add(values)
-        elif isinstance(values, (set, list, tuple)):
-            hosts.update(value for value in values if isinstance(value, str))
-    normalized = {host.strip("[]").casefold() for host in hosts if host}
-    ipv4_capable = any(
-        host in ("*", "0.0.0.0") or host.startswith("127.")
-        for host in normalized)
-    ipv6_loopback_only = bool(normalized) and not ipv4_capable and all(
-        host in ("::", "::1", "localhost") for host in normalized)
-    return "localhost" if ipv6_loopback_only else "127.0.0.1"
+    output = run_cmd(["lsof", "-iTCP", "-sTCP:LISTEN", "-P", "-n"])
+    return parse_lsof_listeners(output)
 
 
 def ps_snapshot(pids=None, with_uid=True):
@@ -702,40 +440,7 @@ def ps_snapshot(pids=None, with_uid=True):
     out1 = run_cmd(base + ["-o", ",".join(fields)])
     out2 = run_cmd(base + ["-o", "pid,args"])
 
-    snap = {}
-    fixed = 5 if with_uid else 4  # pid [uid] etime cpu mem 之后的都是 comm
-    for line in out1.splitlines():
-        toks = line.split()
-        if len(toks) < fixed + 1:
-            continue
-        try:
-            pid = int(toks[0])
-        except ValueError:
-            continue  # 表头行
-        i = 1
-        entry = {"args": ""}
-        if with_uid:
-            try:
-                entry["uid"] = int(toks[1])
-            except ValueError:
-                entry["uid"] = -1
-            i = 2
-        entry["etime"] = parse_etime(toks[i])
-        entry["cpu"] = _to_float(toks[i + 1])
-        entry["mem"] = _to_float(toks[i + 2])
-        entry["comm"] = " ".join(toks[i + 3:])
-        snap[pid] = entry
-    for line in out2.splitlines():
-        toks = line.split(None, 1)
-        if not toks:
-            continue
-        try:
-            pid = int(toks[0])
-        except ValueError:
-            continue
-        if pid in snap:
-            snap[pid]["args"] = toks[1] if len(toks) > 1 else ""
-    return snap
+    return parse_ps_snapshot(out1, out2, with_uid=with_uid)
 
 
 def lsof_cwds(pids):
@@ -745,17 +450,7 @@ def lsof_cwds(pids):
         return {}
     out = run_cmd(["lsof", "-a", "-p", ",".join(str(p) for p in pids),
                    "-d", "cwd", "-Fn"])
-    result = {}
-    cur = None
-    for line in out.splitlines():
-        if line.startswith("p"):
-            try:
-                cur = int(line[1:])
-            except ValueError:
-                cur = None
-        elif line.startswith("n") and cur is not None:
-            result[cur] = line[1:]
-    return result
+    return parse_lsof_cwds(out)
 
 
 def pid_alive(pid):
@@ -770,166 +465,10 @@ def pid_alive(pid):
 
 # ---------------------------------------------------------------- 状态构建
 
-SYSTEM_PATH_PREFIXES = ("/usr/libexec/", "/usr/sbin/", "/sbin/", "/System/", "/usr/lib/")
-
-# 开发服务关键词：命中 name/args 时优先归为 "mine"（覆盖 .app 规则，
-# 例如 ollama 守护进程在 Ollama.app 内、Docker 在 Docker.app 内）
-DEV_KEYWORDS = (
-    "python", "node", "ruby", "php", "nginx", "caddy", "postgres",
-    "mysql", "redis", "mongo", "ollama", "docker", "deno", "bun",
-    "uvicorn", "gunicorn", "hugo", "vite", "streamlit", "jupyter",
-    "ngrok", "frp", "code-server", "java",
-)
-
-
-def classify_group(key, name, comm, args, cwd, promoted):
-    if key in promoted:
-        return "mine"
-    text = name.lower()
-    if any(k in text for k in DEV_KEYWORDS):
-        return "mine"
-    if ".app/Contents/" in comm or ".app/Contents/" in args:
-        return "background"
-    if comm.startswith(SYSTEM_PATH_PREFIXES):
-        return "background"
-    if "/Library/Containers/" in comm or "/Library/Containers/" in (cwd or ""):
-        return "background"
-    return "mine"
-
-
-HOME_DIR = os.path.expanduser("~")
-
-
-def project_name(cwd):
-    """从工作目录推断项目名（最后一段目录名），无有效 cwd 时返回 None。"""
-    if not cwd:
-        return None
-    cwd = cwd.rstrip("/")
-    if not cwd or cwd == "/" or cwd == HOME_DIR:
-        return None
-    return os.path.basename(cwd) or None
-
-
-# ---------------------------------------------------------------- 进程溯源
-# 沿 PPID 链向上识别「是谁启动了这个服务」：AI 编程助手、编辑器、终端、
-# 总控台自身或 launchd。结果只是展示用的尽力判断，不影响任何启停逻辑。
-
-# 向上爬时要跳过的包装层（按 argv[0] 基名匹配）：壳、包管理器与任务执行器
-_ORIGIN_SKIP_NAMES = {
-    "zsh", "bash", "sh", "dash", "fish", "login", "su", "sudo", "env",
-    "command", "xargs", "nohup", "setsid", "script", "expect", "caffeinate",
-    "launchd",
-    "npm", "npx", "pnpm", "yarn", "corepack", "make", "just",
-    "node", "tsx", "nodemon", "deno", "bun", "bunx",
-    "python", "python3", "uv", "poetry", "pip", "pipx",
-    "ruby", "php", "java", "dotnet", "go", "cargo",
-}
-
-# 已知 AI 编程助手签名（在祖先 args 中做词边界匹配，按顺序取先命中者）
-_ORIGIN_AGENT_PATTERNS = (
-    (re.compile(r"\bcodex\b", re.I), "Codex"),
-    (re.compile(r"claude-code|\bclaude\b", re.I), "Claude Code"),
-    (re.compile(r"\bkimi\b", re.I), "Kimi"),
-    (re.compile(r"\bgemini\b", re.I), "Gemini"),
-    (re.compile(r"\baider\b", re.I), "Aider"),
-    (re.compile(r"\bopencode\b", re.I), "OpenCode"),
-    (re.compile(r"\bgoose\b", re.I), "Goose"),
-    (re.compile(r"\bcursor-agent\b", re.I), "Cursor"),
-    (re.compile(r"\bcopilot\b", re.I), "Copilot"),
-    (re.compile(r"\bqwen\b", re.I), "Qwen"),
-    (re.compile(r"\bqoder\b", re.I), "Qoder"),
-    (re.compile(r"\bamp\b", re.I), "Amp"),
-    (re.compile(r"\bcodebuddy\b", re.I), "CodeBuddy"),
-)
-
-# .app 包名 → (展示名, 图标)。未列出的包按原名 + package 图标展示
-_ORIGIN_APP_ALIASES = {
-    "visual studio code": ("VS Code", "code"),
-    "visual studio code - insiders": ("VS Code", "code"),
-    "cursor": ("Cursor", "code"),
-    "trae": ("Trae", "code"),
-    "windsurf": ("Windsurf", "code"),
-    "zed": ("Zed", "code"),
-    "sublime text": ("Sublime", "code"),
-    "webstorm": ("WebStorm", "code"),
-    "intellij idea": ("IDEA", "code"),
-    "goland": ("GoLand", "code"),
-    "pycharm": ("PyCharm", "code"),
-    "nova": ("Nova", "code"),
-    "xcode": ("Xcode", "code"),
-    "iterm2": ("iTerm", "terminal"),
-    "iterm": ("iTerm", "terminal"),
-    "terminal": ("终端", "terminal"),
-    "warp": ("Warp", "terminal"),
-    "kitty": ("kitty", "terminal"),
-    "alacritty": ("Alacritty", "terminal"),
-    "wezterm": ("WezTerm", "terminal"),
-    "docker": ("Docker", "package"),
-    "ollama": ("Ollama", "package"),
-    "obsidian": ("Obsidian", "package"),
-}
-_ORIGIN_BUNDLE_RE = re.compile(r"/([^/]+)\.app/Contents/MacOS/", re.I)
-
-# 终端复用器（直接以 comm 命名，不进跳过表）
-_ORIGIN_MULTIPLEXERS = {"tmux": "tmux", "screen": "screen"}
-
-
 def origin_snapshot():
     """ps -axo pid=,ppid=,args → {pid: (ppid, args)}，供来源溯源。"""
-    table = {}
-    for line in run_cmd(["ps", "-axo", "pid=,ppid=,args"]).splitlines():
-        toks = line.split(None, 2)
-        if len(toks) < 2:
-            continue
-        try:
-            pid, ppid = int(toks[0]), int(toks[1])
-        except ValueError:
-            continue
-        table[pid] = (ppid, toks[2] if len(toks) > 2 else "")
-    return table
-
-
-def attribute_origin(pid, table):
-    """沿 PPID 链识别来源应用，返回 {"label", "icon"} 或 None。
-
-    祖先 args 中带有总控台 run-token 前缀（console-run:）即判定为
-    「总控台启动」——本机任一总控台实例的受管进程组都持有该标记。
-    未识别的中间层先记为候选并继续上爬；AI 助手 / 编辑器 / 终端 /
-    总控台 / launchd 是更优答案，都没有时才以最近的未识别进程命名。
-    最多上爬 12 层，遇到环或缺失即终止。
-    """
-    cur, seen, candidate = pid, set(), None
-    for _ in range(12):
-        entry = table.get(cur)
-        if not entry:
-            break
-        ppid, _ = entry
-        if ppid in seen:
-            break
-        seen.add(ppid)
-        parent_args = (table.get(ppid) or (0, ""))[1] or ""
-        if ppid <= 1:
-            return candidate or {"label": "系统", "icon": "server"}
-        if RUN_TOKEN_ARG_PREFIX in parent_args:
-            return {"label": "总控台", "icon": "rocket"}
-        hay = parent_args.casefold()
-        for pattern, label in _ORIGIN_AGENT_PATTERNS:
-            if pattern.search(hay):
-                return {"label": label, "icon": "bot"}
-        bundle = _ORIGIN_BUNDLE_RE.search(parent_args)
-        if bundle:
-            app_name = bundle.group(1)
-            label, icon = _ORIGIN_APP_ALIASES.get(
-                app_name.casefold(), (app_name, "package"))
-            return {"label": label, "icon": icon}
-        base = os.path.basename(
-            parent_args.split()[0]).lstrip("-") if parent_args.split() else ""
-        if base in _ORIGIN_MULTIPLEXERS:
-            return {"label": _ORIGIN_MULTIPLEXERS[base], "icon": "terminal"}
-        if base and base not in _ORIGIN_SKIP_NAMES and candidate is None:
-            candidate = {"label": base, "icon": "package"}
-        cur = ppid
-    return candidate
+    output = run_cmd(["ps", "-axo", "pid=,ppid=,args"])
+    return parse_origin_snapshot(output)
 
 
 def build_services(cfg, groups=None):
@@ -1024,25 +563,8 @@ def pgid_members_map():
     """ps -axo pid=,pgid= → {pgid: [pid, ...]}。
     进程退出后其子孙仍保留原 pgid（被 launchd 收养也不变），
     因此按 pgid 能找到「脚本把服务放后台后自己退出」的存活成员。"""
-    groups = {}
-    for line in run_cmd(["ps", "-axo", "pid=,pgid="]).splitlines():
-        parts = line.split()
-        if len(parts) != 2:
-            continue
-        try:
-            pid, pgid = int(parts[0]), int(parts[1])
-        except ValueError:
-            continue
-        groups.setdefault(pgid, []).append(pid)
-    return groups
-
-
-def _managed_candidates(app, groups):
-    token = app.get("runToken")
-    pgid = app.get("lastPgid") or app.get("lastPid")
-    if not isinstance(token, str) or not token or not isinstance(pgid, int) or pgid <= 0:
-        return set()
-    return set(groups.get(pgid, []))
+    output = run_cmd(["ps", "-axo", "pid=,pgid="])
+    return parse_pgid_members(output)
 
 
 def managed_process_index(apps, groups=None):
@@ -1057,24 +579,17 @@ def managed_process_index(apps, groups=None):
             and isinstance(app.get("lastPgid") or app.get("lastPid"), int)
             for app in apps)
         groups = pgid_members_map() if needs_groups else {}
-    candidates = {}
     all_pids = set()
     for app in apps:
-        pids = _managed_candidates(app, groups)
-        candidates[app.get("id")] = pids
-        all_pids.update(pids)
+        all_pids.update(core_managed_candidate_pids(app, groups))
     snap = ps_snapshot(all_pids, with_uid=True) if all_pids else {}
-    result = {}
-    for app in apps:
-        token = app.get("runToken")
-        marker = RUN_TOKEN_ARG_PREFIX + token if token else None
-        current_user = sorted(
-            pid for pid in candidates.get(app.get("id"), set())
-            if snap.get(pid, {}).get("uid") == SELF_UID)
-        controller_found = bool(marker and any(
-            marker in snap.get(pid, {}).get("args", "") for pid in current_user))
-        # 随机标记在进程组的常驻外层 shell 上；校验后整组均为受控后代。
-        result[app.get("id")] = current_user if controller_found else []
+    result = core_managed_process_index(
+        apps,
+        groups,
+        snap,
+        current_uid=SELF_UID,
+        run_token_arg_prefix=RUN_TOKEN_ARG_PREFIX,
+    )
     return result, snap, groups
 
 
@@ -1090,45 +605,26 @@ def legacy_managed_pid(app, listeners=None, snap=None, cwds=None):
     换 PID，但仍必须在配置端口上按当前 UID + 真实 cwd 唯一命中；因此
     Next/Vite 等重建子进程后不会丢失关联，也不会只凭端口误认其他项目。
     """
-    if app.get("runToken"):
-        return None
-    recorded_pid = app.get("lastPid")
-    port = app.get("port")
-    expected_cwd = app.get("cwd")
-    if (not isinstance(port, int) or port <= 0
-            or not isinstance(expected_cwd, str) or not expected_cwd):
+    if not core_legacy_identity_applicable(app):
         return None
     if listeners is None:
         listeners = scan_listeners()
-    port_pids = {pid for pid, listening_port in listeners
-                 if listening_port == port}
-    if not app.get("attached"):
-        if not isinstance(recorded_pid, int) or recorded_pid <= 0:
-            return None
-        port_pids.intersection_update({recorded_pid})
+    port_pids = core_legacy_candidate_pids(app, listeners)
     if not port_pids:
         return None
     if snap is None:
         snap = ps_snapshot(port_pids, with_uid=True)
     if cwds is None:
         cwds = lsof_cwds(port_pids)
-    matches = []
-    for pid in sorted(port_pids):
-        if snap.get(pid, {}).get("uid") != SELF_UID:
-            continue
-        actual_cwd = cwds.get(pid)
-        if not actual_cwd:
-            continue
-        try:
-            same_cwd = (
-                os.path.realpath(actual_cwd) == os.path.realpath(expected_cwd))
-        except OSError:
-            same_cwd = False
-        if same_cwd:
-            matches.append(pid)
-    if recorded_pid in matches:
-        return recorded_pid
-    return matches[0] if app.get("attached") and len(matches) == 1 else None
+    return core_legacy_managed_pid(
+        app,
+        listeners,
+        snap,
+        cwds,
+        current_uid=SELF_UID,
+        cwd_equal=lambda actual, expected: (
+            os.path.realpath(actual) == os.path.realpath(expected)),
+    )
 
 
 def listener_app_owners(apps, listeners, snap, cwds, groups=None):
@@ -1139,19 +635,23 @@ def listener_app_owners(apps, listeners, snap, cwds, groups=None):
     如果异常配置让同一 PID 同时命中多张卡片，则不做关联，避免误导 UI。
     """
     managed, _, _ = managed_process_index(apps, groups)
-    candidates = {}
-    for app in apps:
-        live = managed.get(app.get("id"), [])
-        if not live:
-            legacy_pid = legacy_managed_pid(app, listeners, snap, cwds)
-            live = [legacy_pid] if legacy_pid else []
-        for pid in live:
-            candidates.setdefault(pid, []).append(app)
-    return {
-        pid: owners[0]
-        for pid, owners in candidates.items()
-        if len(owners) == 1
-    }
+    if cwds is None:
+        legacy_pids = set()
+        for app in apps:
+            legacy_pids.update(core_legacy_candidate_pids(app, listeners))
+        cwds = lsof_cwds(legacy_pids) if legacy_pids else {}
+    return core_listener_app_owners(
+        apps,
+        listeners,
+        snap,
+        cwds,
+        groups,
+        current_uid=SELF_UID,
+        cwd_equal=lambda actual, expected: (
+            os.path.realpath(actual) == os.path.realpath(expected)),
+        run_token_arg_prefix=RUN_TOKEN_ARG_PREFIX,
+        managed_by_app=managed,
+    )
 
 
 def build_apps(cfg, listeners, groups=None):
@@ -2637,23 +2137,6 @@ def diagnose_app(cfg, app):
     else:
         summary = "日志里没有命中常见错误模式，建议打开完整日志人工排查。"
     return {"ok": True, "issues": issues, "summary": summary}
-
-
-def validate_port(value):
-    """→ (port|None, error|None)。接受 null / 整数 / 数字字符串，范围 1-65535。"""
-    if value is None or value == "":
-        return None, None
-    if isinstance(value, bool):
-        return None, "port 必须是 1-65535 的整数"
-    if isinstance(value, int):
-        port = value
-    elif isinstance(value, str) and value.strip().isdigit():
-        port = int(value.strip())
-    else:
-        return None, "port 必须是 1-65535 的整数"
-    if not (1 <= port <= 65535):
-        return None, "port 必须在 1-65535 之间"
-    return port, None
 
 
 def validate_app_fields(data, partial):

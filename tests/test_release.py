@@ -167,6 +167,15 @@ class ReleaseFixtureTests(unittest.TestCase):
 
 
 class ProjectReleaseManifestTests(unittest.TestCase):
+    def test_extracted_runtime_core_is_in_payload(self):
+        names = {
+            path.relative_to(release.ROOT).as_posix()
+            for path in release.iter_release_files()
+        }
+        self.assertIn("adcc/__init__.py", names)
+        self.assertIn("adcc/storage/config.py", names)
+        self.assertIn("adcc/runtime/lifecycle.py", names)
+
     def test_required_open_source_documents_are_in_payload(self):
         names = {
             path.relative_to(release.ROOT).as_posix()

@@ -111,6 +111,18 @@ def check_required_files() -> str:
         "requirements-dev.txt",
         "Makefile",
         "server.py",
+        "adcc/__init__.py",
+        "adcc/core/__init__.py",
+        "adcc/core/constants.py",
+        "adcc/core/errors.py",
+        "adcc/core/models.py",
+        "adcc/runtime/__init__.py",
+        "adcc/runtime/lifecycle.py",
+        "adcc/runtime/ports.py",
+        "adcc/runtime/processes.py",
+        "adcc/runtime/tasks.py",
+        "adcc/storage/__init__.py",
+        "adcc/storage/config.py",
         "start.command",
         "tests/test_server.py",
         "docs/screenshots/ops-launchpad.jpg",
@@ -212,6 +224,7 @@ def check_version() -> str:
 
 def check_python_syntax() -> str:
     paths = [ROOT / "server.py"]
+    paths.extend(sorted((ROOT / "adcc").rglob("*.py")))
     paths.extend(sorted((ROOT / "tools").glob("*.py")))
     paths.extend(sorted((ROOT / "tests").glob("test_*.py")))
     for path in paths:

@@ -44,6 +44,7 @@ INCLUDE = (
     "licenses",
     *REQUIRED_LICENSES,
     "server.py",
+    "adcc",
     "start.command",
     "总控台.app",
     "static",

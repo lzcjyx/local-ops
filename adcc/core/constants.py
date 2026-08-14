@@ -1,0 +1,38 @@
+"""OS-neutral constants shared by the ADCC core Modules."""
+
+CURRENT_SCHEMA_VERSION = 1
+DEFAULT_UI_THEME = "ops"
+
+RUN_TOKEN_ENV = "CONSOLE_RUN_TOKEN"
+RUN_TOKEN_ARG_PREFIX = "console-run:"
+TASK_CANCELED_EXIT_CODE = 130
+
+CONFIG_DEFAULT = {
+    "schemaVersion": CURRENT_SCHEMA_VERSION,
+    "apps": [],
+    "hidden": [],
+    "pinned": [],
+    "promoted": [],
+    "watchedKeywords": [],
+    "uiTheme": DEFAULT_UI_THEME,
+}
+
+APP_DEFAULT = {
+    "id": None,
+    "name": "",
+    "command": "",
+    "cwd": None,
+    "port": None,
+    "emoji": None,
+    "glyph": None,
+    "icon": None,
+    "favicon": None,
+    "kind": "service",
+    "lastPid": None,
+    "lastPgid": None,
+    "runToken": None,
+    "attached": False,
+    "lastExit": None,
+    "createdAt": 0,
+}
+

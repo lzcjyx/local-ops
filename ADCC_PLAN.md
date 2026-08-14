@@ -1,0 +1,588 @@
+# AI Dev Control Center — Implementation PLAN
+
+> Execution plan for `ADCC_SPEC.md`  
+> Strategy: incremental migration from `laogou717/local-ops`, not a rewrite  
+> Rule: **do not begin the next milestone until the current milestone's exit gate passes**
+
+---
+
+## 0. How this plan must be executed
+
+### Source-of-truth order
+
+When documents disagree:
+
+1. `ADCC_SPEC.md` — product/architecture requirements;
+2. repository `AGENTS.md` — repository-local engineering rules;
+3. `ADCC_PLAN.md` — execution sequence;
+4. existing code/comments — current implementation details.
+
+If a requirement truly conflicts with a repository rule, record the conflict in an ADR and make the smallest reversible change. Do not silently choose one.
+
+### Milestone rules
+
+For every milestone:
+
+1. inspect current implementation and relevant tests;
+2. write/update tests before or alongside behavior changes;
+3. implement the smallest coherent slice;
+4. run targeted tests;
+5. run the full currently-supported suite;
+6. update docs/API contracts if behavior changed;
+7. record architectural decisions that would otherwise be rediscovered;
+8. update the milestone status/checklist;
+9. stop at a clean checkpoint if context/resources are low.
+
+Never disable security/safety tests to progress.
+
+### Recommended branch strategy
+
+Use a feature branch for ADCC migration. Do not push/merge automatically unless explicitly authorized.
+
+Suggested initial branch:
+
+```text
+feat/adcc-control-plane
+```
+
+Milestone-scale commits are preferred over one giant commit.
+
+---
+
+# Milestone M0 — Baseline, inventory, and safety harness
+
+**Goal:** Prove the upstream baseline works and create an explicit migration map before structural edits.
+
+## Tasks
+
+- [x] Record upstream baseline commit in `docs/architecture/BASELINE.md`.
+- [x] Inventory major responsibilities currently inside `server.py`.
+- [x] Inventory existing API endpoints and frontend dependencies on them.
+- [x] Inventory platform-specific macOS calls (`ps`, `lsof`, `osascript`, signals/process groups, paths, launcher behavior).
+- [x] Inventory config/data paths and migration behavior.
+- [x] Inventory all existing tests and what safety guarantees they cover.
+- [x] Run the full current test/check suite on the available platform.
+- [x] Add a lightweight architecture map without changing runtime behavior.
+- [x] Add `ADCC_SPEC.md` and `ADCC_PLAN.md` to the repo if not already present.
+
+## Deliverables
+
+```text
+docs/architecture/BASELINE.md
+docs/architecture/CURRENT_ARCHITECTURE.md
+docs/architecture/API_BASELINE.md
+```
+
+## Exit gate
+
+- Current supported tests pass, or every pre-existing failure is recorded with evidence.
+- No intentional behavior change.
+- Major `server.py` responsibilities and OS dependencies are documented.
+
+---
+
+# Milestone M1 — Extract Core boundaries without changing behavior
+
+**Goal:** Turn `server.py` from the only implementation location into a compatibility entrypoint over modules.
+
+## Tasks
+
+- [x] Create `adcc/` package.
+- [x] Extract pure models/constants/errors first.
+- [x] Extract config load/save and atomic persistence.
+- [x] Extract process/port data normalization functions.
+- [x] Extract service/task lifecycle logic where seams are safe.
+- [x] Keep existing HTTP endpoints and frontend working.
+- [x] Make `server.py` delegate rather than duplicate extracted behavior.
+- [x] Add unit tests for every extracted pure module.
+- [x] Avoid changing API payload shapes in this milestone.
+
+## Constraints
+
+- No Tauri yet.
+- No Windows feature yet except interfaces/stubs if needed.
+- No frontend framework migration.
+- Do not split code just for aesthetics; each module needs a coherent responsibility and tests.
+
+## Exit gate
+
+- Existing tests pass.
+- `python server.py` behavior remains compatible on the currently supported platform.
+- Significant process/config logic is callable without constructing the HTTP server.
+
+---
+
+# Milestone M2 — PlatformAdapter + macOS parity + Windows runtime support
+
+**Goal:** Remove OS assumptions from Core and make runtime inspection/control work on Windows.
+
+## Tasks
+
+### Interface
+
+- [ ] Define `PlatformAdapter` capabilities from SPEC.
+- [ ] Add typed capability/unsupported errors.
+- [ ] Inject the adapter into runtime services; avoid global OS branching spread across modules.
+
+### macOS
+
+- [ ] Move existing macOS logic behind `MacOSPlatformAdapter`.
+- [ ] Preserve current ownership, process-origin and port behavior.
+- [ ] Run upstream parity tests.
+
+### Windows
+
+- [ ] Implement current-user process enumeration.
+- [ ] Implement listening-port enumeration.
+- [ ] Implement parent/process ancestry where available.
+- [ ] Implement process start with durable run identity.
+- [ ] Implement graceful stop and explicit force semantics.
+- [ ] Implement process-tree handling safely.
+- [ ] Implement cwd/command retrieval with graceful `unknown` fallback.
+- [ ] Add Windows-specific tests and smoke fixtures.
+
+### CI
+
+- [ ] Add Windows to CI matrix for tests that are now portable.
+- [ ] Keep macOS CI.
+
+## Exit gate
+
+On Windows and macOS:
+
+- managed test service can start;
+- its listening port is discoverable;
+- the managed identity is recognized;
+- an unrelated external process on the same configured port is not killed/claimed;
+- stop semantics pass tests;
+- current-user safety checks pass.
+
+---
+
+# Milestone M3 — Workspace/Project/Resource domain and config migration
+
+**Goal:** Evolve from a flat launchpad into a multi-project control plane.
+
+## Tasks
+
+- [ ] Implement `Workspace`, `Project`, and `ResourceDefinition` models.
+- [ ] Add project registry CRUD.
+- [ ] Associate service/task definitions with projects.
+- [ ] Add `mcp_server` resource kind.
+- [ ] Add read-only project detection wrapper using existing detection capabilities.
+- [ ] Detect Git root.
+- [ ] Add migration from existing flat local-ops app config.
+- [ ] Create `Unassigned` bucket for ambiguous resources.
+- [ ] Ensure migration is versioned, idempotent and backed up.
+- [ ] Add project summary to state API without breaking legacy fields yet.
+- [ ] Add project UI grouping to existing web UI.
+
+## Exit gate
+
+- Existing config migrates without data loss in fixtures.
+- Multiple projects can contain resources with the same common port definition.
+- Runtime identity remains independent of project grouping.
+- UI can filter/group resources by project.
+
+---
+
+# Milestone M4 — Run model, SQLite history, logs, API v1 and event stream
+
+**Goal:** Create a durable control-plane API that GUI/CLI/MCP can share.
+
+## Tasks
+
+- [ ] Implement `ManagedRun` model and status enum.
+- [ ] Add SQLite operational database and schema migrations.
+- [ ] Persist service/task run start/end transitions.
+- [ ] Index logs by run ID.
+- [ ] Implement bounded/tail log reads.
+- [ ] Add `/api/v1/health` and `/api/v1/state`.
+- [ ] Add `/api/v1/projects`, `/resources`, `/runs` APIs.
+- [ ] Keep compatibility `/api/...` routes while frontend migration is incomplete.
+- [ ] Add SSE `/api/v1/events` or an equivalent dependency-light event stream.
+- [ ] Add contract tests for all v1 models/status enums.
+- [ ] Add daemon restart reconciliation tests.
+
+## Exit gate
+
+- GUI can still operate.
+- A task run has a durable run ID/history record.
+- Core restart does not falsely mark vanished work as success.
+- API contract tests pass.
+
+---
+
+# Milestone M5 — CLI client
+
+**Goal:** Make the control plane useful to humans/scripts without the GUI and establish a machine-friendly interface.
+
+## Tasks
+
+- [ ] Implement `adcc` CLI as a daemon client.
+- [ ] Support `status`, `doctor`, project/resource listing, start/stop/restart, ports, runs and logs.
+- [ ] Add `--json` to read/query commands.
+- [ ] Define stable exit codes.
+- [ ] Detect daemon endpoint/token from user data directory.
+- [ ] Provide clear error when daemon is unavailable.
+- [ ] Do not duplicate process-management implementation in CLI.
+- [ ] Add CLI contract tests.
+
+## Exit gate
+
+The following works on Windows and macOS:
+
+```text
+adcc status --json
+adcc projects list --json
+adcc start <resource-id>
+adcc logs <run-id>
+adcc port owner <port> --json
+```
+
+with predictable exit codes and no GUI requirement.
+
+---
+
+# Milestone M6 — MCP server for safe Agent control
+
+**Goal:** Let coding agents query and operate ADCC through structured tools.
+
+## Tasks
+
+- [ ] Add local MCP server entrypoint.
+- [ ] Implement stdio transport first.
+- [ ] Expose safe tools defined in SPEC.
+- [ ] Reuse the same application/core layer as HTTP/CLI.
+- [ ] Bound log output and list sizes.
+- [ ] Validate ownership for stop/restart/cancel operations.
+- [ ] Do not expose unrestricted shell or raw kill-PID tools.
+- [ ] Add MCP schema/contract tests.
+- [ ] Add an example configuration for a generic coding harness.
+
+## Exit gate
+
+A test MCP client can:
+
+1. list projects;
+2. inspect a resource;
+3. start/run a managed resource/task;
+4. retrieve bounded logs;
+5. stop/cancel only managed items;
+6. obtain a typed error for unsafe/invalid actions.
+
+---
+
+# Milestone M7 — External Agent adapters and session lifecycle
+
+**Goal:** Treat coding agents as first-class managed executions without rebuilding them.
+
+## Tasks
+
+- [ ] Implement `AgentAdapter` and `AgentSession` models.
+- [ ] Implement generic command adapter.
+- [ ] Add user-configurable command/argv templates.
+- [ ] Support prompt via file/stdin where configured.
+- [ ] Inject ADCC run/project/session environment variables.
+- [ ] Capture PID/process tree/logs/exit status.
+- [ ] Add per-project and global concurrency limits.
+- [ ] Add agent-session UI list/detail.
+- [ ] Add CLI commands for agent start/list/stop.
+- [ ] Add API and MCP read support for agent sessions.
+- [ ] Use a fake command-based agent fixture for integration tests.
+
+## Optional adapter presets
+
+Presets for OpenCode/ZCode/OMP may be added only as configuration templates. Core behavior remains generic.
+
+## Exit gate
+
+- A fake agent can be launched, observed and stopped.
+- A real user-configured agent command can be launched without code changes to ADCC.
+- Agent logs and exit state appear in GUI/CLI/API.
+- Concurrency policy is enforced.
+
+---
+
+# Milestone M8 — Git worktrees, locks, and orchestrator MVP
+
+**Goal:** Safely coordinate parallel agent work.
+
+## Tasks
+
+### Git/worktrees
+
+- [ ] Detect repository and current worktree.
+- [ ] List worktrees safely.
+- [ ] Create ADCC-owned worktree/branch.
+- [ ] Associate worktree with agent session.
+- [ ] Refuse unsafe cleanup.
+- [ ] Add tests around dirty repos, collisions and unmerged worktrees.
+
+### Locks
+
+- [ ] Implement lock manager.
+- [ ] Support project/resource/worktree/exclusive custom locks.
+- [ ] Persist enough information to reconcile after restart.
+
+### Workflow
+
+- [ ] Implement `WorkflowDefinition`, `WorkflowRun`, `WorkflowStep`.
+- [ ] Validate DAG and reject cycles.
+- [ ] Implement step dependency scheduling.
+- [ ] Implement bounded parallelism.
+- [ ] Implement step kinds: `service`, `task`, `agent`, `gate`.
+- [ ] Add timeout/retry policy.
+- [ ] Add cancellation propagation.
+- [ ] Persist state transitions.
+- [ ] Implement safe resume/reconciliation after restart.
+
+### Test workflow
+
+Create an integration fixture equivalent to:
+
+```text
+agent implement -> test task -> reviewer agent -> gate
+```
+
+## Exit gate
+
+- Parallel write agents default to separate worktrees.
+- Conflicting lock steps do not run together.
+- Failed test blocks downstream required step.
+- Retry occurs only under policy.
+- Cancel stops pending work and safely requests termination of running managed work.
+- Restart does not invent success.
+
+---
+
+# Milestone M9 — Tauri 2 Desktop shell
+
+**Goal:** Turn the local control plane into a real desktop product without moving Core logic into the shell.
+
+## Tasks
+
+- [ ] Create `desktop/` Tauri 2 application.
+- [ ] Reuse/load existing local UI during initial integration.
+- [ ] Start or connect to ADCC Core.
+- [ ] Add daemon health/reconnect behavior.
+- [ ] Add system tray.
+- [ ] Add open/hide/quit behavior.
+- [ ] Add native notifications.
+- [ ] Add native folder/file selection.
+- [ ] Implement secure local daemon token handoff.
+- [ ] Ensure closing the window does not accidentally terminate managed resources.
+- [ ] Add Windows/macOS packaging smoke tests.
+
+## Exit gate
+
+On Windows and macOS:
+
+- app launches from a desktop artifact;
+- daemon is reachable;
+- tray works;
+- project can be added;
+- a service can be started and logs viewed;
+- closing/reopening UI does not lose daemon state.
+
+---
+
+# Milestone M10 — Control Center GUI: projects, agents and workflows
+
+**Goal:** Complete the product experience around the new domain model.
+
+## Tasks
+
+### Navigation
+
+- [ ] Overview
+- [ ] Projects
+- [ ] Agents
+- [ ] Services & MCP
+- [ ] Tasks & Runs
+- [ ] Workflows
+- [ ] Logs
+- [ ] Settings
+
+### Overview
+
+- [ ] active projects;
+- [ ] active agents;
+- [ ] active services;
+- [ ] failed tasks/workflows;
+- [ ] port conflicts;
+- [ ] daemon health.
+
+### Project detail
+
+- [ ] Git/worktree status;
+- [ ] service/MCP status;
+- [ ] agent sessions;
+- [ ] runs/logs;
+- [ ] workflows;
+- [ ] quick actions.
+
+### Workflow view
+
+P0 may use a structured list/graph-like layout rather than building a full visual editor.
+
+- [ ] show dependencies;
+- [ ] current step states;
+- [ ] queued reason/locks;
+- [ ] retry/cancel controls;
+- [ ] failure log shortcut.
+
+## Constraint
+
+Do not migrate to React/Vue/Svelte merely for aesthetics. A frontend stack migration requires a separate ADR with measurable benefit and must not block P0 completion.
+
+## Exit gate
+
+A user can complete the first-release journey in SPEC section 26 without CLI.
+
+---
+
+# Milestone M11 — Security hardening, cross-platform CI, packaging
+
+**Goal:** Make the result safe and releasable for regular local use.
+
+## Tasks
+
+- [ ] Local token/auth model reviewed and tested.
+- [ ] Host/origin/CORS rules tested.
+- [ ] Command-template injection tests.
+- [ ] Current-user kill/attach tests on Windows/macOS.
+- [ ] Log traversal/path validation tests.
+- [ ] Worktree destructive-operation tests.
+- [ ] Config corruption/backup recovery tests.
+- [ ] SQLite migration/recovery tests.
+- [ ] Daemon single-instance behavior.
+- [ ] Port selection/collision tests.
+- [ ] Windows CI full supported suite.
+- [ ] macOS CI full supported suite.
+- [ ] Build/package both desktop targets.
+- [ ] Preserve upstream MIT attribution/notices.
+- [ ] Update SECURITY.md and release docs.
+
+## Exit gate
+
+- Required Windows/macOS CI is green.
+- No known P0 security blocker.
+- Install/package smoke tests pass.
+- Release limitations are documented explicitly.
+
+---
+
+# Milestone M12 — Dogfood release and stabilization
+
+**Goal:** Use ADCC to manage its own development and at least two real external projects before declaring v0.1 usable.
+
+## Dogfood scenarios
+
+- [ ] ADCC manages its own daemon/task/test commands.
+- [ ] Register a web/backend project with multiple services.
+- [ ] Register a project with at least one MCP server.
+- [ ] Launch a real external coding-agent harness through command adapter.
+- [ ] Launch two parallel agent sessions in separate worktrees.
+- [ ] Execute `agent -> tests -> review/gate` workflow.
+- [ ] Restart the daemon while at least one independent managed service remains running, then reconcile it.
+- [ ] Deliberately create a port conflict and verify no unrelated process is killed.
+- [ ] Exercise failure/retry/cancel and inspect run history.
+
+## Deliverables
+
+```text
+CHANGELOG
+Known limitations
+Migration guide from local-ops
+Quick start
+Agent/MCP integration guide
+Architecture overview
+```
+
+## Exit gate — v0.1 usable
+
+All 14 first-usable-release conditions in `ADCC_SPEC.md` section 26 pass in a documented validation run.
+
+---
+
+# Dependency graph
+
+```text
+M0 Baseline
+ |
+ v
+M1 Core extraction
+ |
+ v
+M2 Platform abstraction + Windows
+ |
+ v
+M3 Projects/resources
+ |
+ v
+M4 Runs/API/history
+ |\
+ | +------> M5 CLI
+ |          |
+ |          v
+ |        M6 MCP
+ |
+ v
+M7 Agent sessions
+ |
+ v
+M8 Worktrees + Orchestrator
+ |
+ v
+M9 Desktop shell
+ |
+ v
+M10 New GUI
+ |
+ v
+M11 Hardening/Packaging
+ |
+ v
+M12 Dogfood Release
+```
+
+M5/M6 can overlap with late M4 work only after v1 API contracts are stable enough; otherwise follow sequential order.
+
+---
+
+# Progress ledger
+
+Coding agents should update only the status field/check boxes, not rewrite completed milestone requirements without explicit SPEC revision.
+
+| Milestone | Status | Exit gate | Notes |
+|---|---|---|---|
+| M0 | COMPLETE | passed | Exact baseline macOS CI passed 159 Python + 7 JS tests; Windows baseline failures documented; architecture/API inventories added. |
+| M1 | COMPLETE | passed | `adcc/` 包提取 config/ports/processes/lifecycle/tasks 策略，`server.py` 减 611 行改为兼容入口委托（ADR-0001）；25 项新单测 + 58 项可移植测试在 Windows 本地通过，macOS 专属回归（fcntl/ps/lsof、159 全量 CI）待 macOS CI 运行确认；发行 allowlist/语法检查/发行测试已覆盖 `adcc/`。 |
+| M2 | NOT STARTED | pending | |
+| M3 | NOT STARTED | pending | |
+| M4 | NOT STARTED | pending | |
+| M5 | NOT STARTED | pending | |
+| M6 | NOT STARTED | pending | |
+| M7 | NOT STARTED | pending | |
+| M8 | NOT STARTED | pending | |
+| M9 | NOT STARTED | pending | |
+| M10 | NOT STARTED | pending | |
+| M11 | NOT STARTED | pending | |
+| M12 | NOT STARTED | pending | |
+
+---
+
+# Stop conditions for the coding agent
+
+Stop at the current milestone boundary and report rather than improvising if any of these occurs:
+
+- an upstream safety guarantee would need to be removed;
+- user data migration cannot be made reversible;
+- platform identity cannot be verified but a destructive action depends on it;
+- the proposed change requires moving core business logic into GUI/Tauri;
+- a vendor-specific Agent integration would become mandatory for Core;
+- tests reveal a pre-existing severe data-loss/security issue that should be addressed before continuing;
+- a milestone's exit gate cannot be satisfied.
+
+For ordinary implementation uncertainty, choose the smallest reversible design that satisfies SPEC, document it in an ADR, and continue.
