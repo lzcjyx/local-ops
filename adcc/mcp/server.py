@@ -299,6 +299,23 @@ def t_list_agent_sessions(server, args):
     return _plain(_get(server._daemon(), path))
 
 
+def t_run_workflow(server, args):
+    workflow_id = _require_text(args, "id")
+    return _plain(_post(server._daemon(),
+                        "/api/v1/workflows/%s/runs" % workflow_id))
+
+
+def t_get_workflow_run(server, args):
+    run_id = _require_text(args, "id")
+    return _plain(_get(server._daemon(), "/api/v1/workflow-runs/" + run_id))
+
+
+def t_cancel_workflow_run(server, args):
+    run_id = _require_text(args, "id")
+    return _plain(_post(server._daemon(),
+                        "/api/v1/workflow-runs/%s/cancel" % run_id))
+
+
 def t_run_task(server, args):
     """启动批处理任务（等价 start_resource，语义更明确）。"""
     resource_id = _require_text(args, "id")
@@ -336,6 +353,12 @@ TOOLS = [
     _tool("list_agent_sessions", "列出 agent 会话（只读）",
           {"limit": {"type": "integer", "description": "1-100"}},
           t_list_agent_sessions),
+    _tool("run_workflow", "运行工作流（返回 run id）",
+          {"id": {"type": "string"}}, t_run_workflow),
+    _tool("get_workflow_run", "获取工作流运行详情（含步骤状态）",
+          {"id": {"type": "string"}}, t_get_workflow_run),
+    _tool("cancel_workflow_run", "取消工作流运行（停止待办与运行中受管步骤）",
+          {"id": {"type": "string"}}, t_cancel_workflow_run),
 ]
 
 TOOL_BY_NAME = {tool["name"]: tool for tool in TOOLS}

@@ -11,7 +11,7 @@ import sqlite3
 import threading
 import time
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -61,7 +61,49 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON agent_sessions(project_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON agent_sessions(status);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON agent_sessions(started_at);
+
+CREATE TABLE IF NOT EXISTS workflow_runs (
+    id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL,
+    workflow_version INTEGER NOT NULL,
+    project_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    started_at INTEGER,
+    ended_at INTEGER,
+    locks_held TEXT,
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_wf_runs_status ON workflow_runs(status);
+CREATE INDEX IF NOT EXISTS idx_wf_runs_workflow ON workflow_runs(workflow_id);
+
+CREATE TABLE IF NOT EXISTS workflow_step_runs (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    step_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    status TEXT NOT NULL,
+    retries INTEGER NOT NULL DEFAULT 0,
+    run_ref TEXT,
+    started_at INTEGER,
+    ended_at INTEGER,
+    error TEXT,
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_wf_step_runs_run ON workflow_step_runs(run_id);
 """
+
+_WORKFLOW_RUN_FIELDS = (
+    "id", "workflow_id", "workflow_version", "project_id", "name",
+    "status", "started_at", "ended_at", "locks_held", "created_at",
+)
+
+_STEP_RUN_FIELDS = (
+    "id", "run_id", "step_id", "kind", "status", "retries", "run_ref",
+    "started_at", "ended_at", "error", "created_at",
+)
 
 _SESSION_FIELDS = (
     "id", "project_id", "adapter_id", "workflow_run_id", "workflow_step_id",
@@ -246,6 +288,102 @@ class RunDatabase:
 
     def running_sessions(self):
         return self.list_sessions(status="running", limit=500)
+
+    # ------------------------------------------------------------ workflows
+
+    def insert_workflow_run(self, run):
+        values = [run.get(field) for field in _WORKFLOW_RUN_FIELDS]
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO workflow_runs (%s) VALUES (%s)"
+                % (", ".join(_WORKFLOW_RUN_FIELDS),
+                   ", ".join("?" for _ in _WORKFLOW_RUN_FIELDS)),
+                values)
+            self._conn.commit()
+
+    def update_workflow_run(self, run_id, fields):
+        allowed = {field for field in _WORKFLOW_RUN_FIELDS if field != "id"}
+        assignments = []
+        values = []
+        for key, value in fields.items():
+            if key in allowed:
+                assignments.append("%s = ?" % key)
+                values.append(value)
+        if not assignments:
+            return
+        values.append(run_id)
+        with self._lock:
+            self._conn.execute(
+                "UPDATE workflow_runs SET %s WHERE id = ?"
+                % ", ".join(assignments), values)
+            self._conn.commit()
+
+    def get_workflow_run(self, run_id):
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT %s FROM workflow_runs WHERE id = ?"
+                % ", ".join(_WORKFLOW_RUN_FIELDS), (run_id,)).fetchone()
+        return _row_to_run(row)
+
+    def list_workflow_runs(self, limit=50, status=None):
+        clauses = []
+        values = []
+        if status is not None:
+            clauses.append("status = ?")
+            values.append(status)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        limit = max(1, min(int(limit), 500))
+        query = ("SELECT %s FROM workflow_runs %s ORDER BY created_at DESC "
+                 "LIMIT ?" % (", ".join(_WORKFLOW_RUN_FIELDS), where))
+        values.append(limit)
+        with self._lock:
+            rows = self._conn.execute(query, values).fetchall()
+        return [_row_to_run(row) for row in rows]
+
+    def get_running_workflow_runs(self):
+        return self.list_workflow_runs(status="running", limit=100)
+
+    def insert_step_run(self, step_run):
+        values = [step_run.get(field) for field in _STEP_RUN_FIELDS]
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO workflow_step_runs (%s) VALUES (%s)"
+                % (", ".join(_STEP_RUN_FIELDS),
+                   ", ".join("?" for _ in _STEP_RUN_FIELDS)),
+                values)
+            self._conn.commit()
+
+    def update_step_run(self, step_run_id, fields):
+        allowed = {field for field in _STEP_RUN_FIELDS if field != "id"}
+        assignments = []
+        values = []
+        for key, value in fields.items():
+            if key in allowed:
+                assignments.append("%s = ?" % key)
+                values.append(value)
+        if not assignments:
+            return
+        values.append(step_run_id)
+        with self._lock:
+            self._conn.execute(
+                "UPDATE workflow_step_runs SET %s WHERE id = ?"
+                % ", ".join(assignments), values)
+            self._conn.commit()
+
+    def get_step_run(self, step_run_id):
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT %s FROM workflow_step_runs WHERE id = ?"
+                % ", ".join(_STEP_RUN_FIELDS), (step_run_id,)).fetchone()
+        return _row_to_run(row)
+
+    def list_step_runs(self, run_id):
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT %s FROM workflow_step_runs WHERE run_id = ? "
+                "ORDER BY created_at" % ", ".join(_STEP_RUN_FIELDS),
+                (run_id,)).fetchall()
+        return [_row_to_run(row) for row in rows]
 
 
 def run_origin_label(app):

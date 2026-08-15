@@ -348,6 +348,43 @@ def cmd_agent_stop(client, args):
     raise ApiError(response.get("error", "停止会话失败"), status)
 
 
+def cmd_workflows_list(client, args):
+    status, body = client.get("/api/v1/workflows")
+    if status != 200:
+        raise ApiError(body.get("error", "获取工作流失败"), status)
+    if args.json:
+        emit(body, True)
+        return EXIT_OK
+    for workflow in body:
+        print("%s  %-24s %d 步骤 %s" % (
+            workflow.get("id"), workflow.get("name"),
+            len(workflow.get("steps") or []),
+            workflow.get("project_id") or ""))
+    return EXIT_OK
+
+
+def cmd_workflow_run(client, args):
+    status, body = client.post(
+        "/api/v1/workflows/%s/runs" % args.workflow_id)
+    if status == 201:
+        if args.json:
+            emit(body, True)
+        else:
+            print("工作流运行 %s 已启动（%s）" % (body.get("id"),
+                                              body.get("status")))
+        return EXIT_OK
+    raise ApiError(body.get("error", "启动工作流失败"), status)
+
+
+def cmd_workflow_cancel(client, args):
+    status, body = client.post(
+        "/api/v1/workflow-runs/%s/cancel" % args.run_id)
+    if status == 200 and body.get("ok", True):
+        emit(body, False)
+        return EXIT_OK
+    raise ApiError(body.get("error", "取消失败"), status)
+
+
 def cmd_logs(client, args):
     target = args.run_id
     run_id = None
@@ -457,6 +494,19 @@ def build_parser():
     agent_run.add_argument("--json", action="store_true")
     agent_stop = agent_sub.add_parser("stop", help="停止会话")
     agent_stop.add_argument("session_id")
+
+    workflows = sub.add_parser("workflows", help="工作流")
+    workflows_sub = workflows.add_subparsers(dest="sub", required=True)
+    workflows_list = workflows_sub.add_parser("list", help="列出工作流")
+    workflows_list.add_argument("--json", action="store_true")
+
+    workflow = sub.add_parser("workflow", help="工作流操作")
+    workflow_sub = workflow.add_subparsers(dest="sub", required=True)
+    workflow_run = workflow_sub.add_parser("run", help="运行工作流")
+    workflow_run.add_argument("workflow_id")
+    workflow_run.add_argument("--json", action="store_true")
+    workflow_cancel = workflow_sub.add_parser("cancel", help="取消运行")
+    workflow_cancel.add_argument("run_id")
     return parser
 
 
@@ -487,6 +537,10 @@ def main(argv=None):
         "agent": lambda client, args: (
             cmd_agent_run(client, args) if args.sub == "run"
             else cmd_agent_stop(client, args)),
+        "workflows": cmd_workflows_list,
+        "workflow": lambda client, args: (
+            cmd_workflow_run(client, args) if args.sub == "run"
+            else cmd_workflow_cancel(client, args)),
     }
     try:
         args.command  # noqa: B018

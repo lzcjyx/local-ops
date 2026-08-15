@@ -45,6 +45,18 @@ from adcc.core.constants import (
 from adcc.core.errors import ConfigSchemaError, FutureConfigSchemaError
 from adcc.core.events import EventBus
 from adcc.agents import AgentRunner, make_adapter, validate_adapter
+from adcc.orchestrator import (
+    ExecutorHooks,
+    LockManager,
+    WorkflowExecutor,
+    make_workflow,
+    validate_workflow,
+)
+from adcc.git.repository import (
+    create_worktree,
+    detect_repo,
+    list_worktrees,
+)
 from adcc.platform import get_platform_adapter
 from adcc.projects import (
     assign_resources_from_apps,
@@ -198,6 +210,132 @@ def get_agent_runner(cfg=None):
     if cfg is not None and AGENT_RUNNER is not None and AGENT_RUNNER._cfg is None:
         AGENT_RUNNER._cfg = cfg
     return AGENT_RUNNER
+
+
+# ---------------------------------------------------------------- M8 编排
+WORKFLOW_EXECUTOR = None
+_workflow_executor_lock = threading.Lock()
+
+
+class ServerExecutorHooks(ExecutorHooks):
+    """把 executor 接到真实 daemon 资源/agent 操作上。"""
+
+    def __init__(self, cfg):
+        self._cfg = cfg
+
+    def _snapshot(self):
+        return self._cfg.snapshot()
+
+    def resolve_resource(self, resource_id):
+        snapshot = self._snapshot()
+        return next(
+            (r for r in snapshot.get("resources") or []
+             if r.get("id") == resource_id), None)
+
+    def get_workflow_definition(self, workflow_id):
+        snapshot = self._snapshot()
+        return next(
+            (w for w in snapshot.get("workflows") or []
+             if w.get("id") == workflow_id), None)
+
+    def start_resource(self, resource_id):
+        resource = self.resolve_resource(resource_id)
+        if resource is None:
+            return False, "资源不存在", None
+        app_id = resource.get("app_id")
+        if not app_id:
+            return False, "资源未关联受管应用", None
+        app = find_app(self._snapshot(), app_id)
+        if app is None:
+            return False, "应用不存在", None
+        if app_alive_sign(app):
+            return True, None, {"running": True}
+        ok, err, proc, pgid, token = start_app(app)
+        if not ok:
+            return False, err, None
+        if not persist_started_app(self._cfg, app_id, proc, pgid, token):
+            stop_pid_tree(pgid)
+            return False, "应用已被删除", None
+        return True, None, {"pid": proc.pid}
+
+    def stop_resource(self, resource_id):
+        resource = self.resolve_resource(resource_id)
+        if resource is None:
+            return False, "资源不存在"
+        app_id = resource.get("app_id")
+        if not app_id:
+            return False, "资源未关联受管应用"
+        app = find_app(self._snapshot(), app_id)
+        if app is None:
+            return False, "应用不存在"
+        ok, error = stop_app_and_clear(self._cfg, app)
+        return ok, error
+
+    def resource_alive(self, resource_id):
+        resource = self.resolve_resource(resource_id)
+        if resource is None:
+            return False
+        app = find_app(self._snapshot(), resource.get("app_id") or "")
+        return bool(app and app_running(app))
+
+    def resource_run_status(self, resource_id):
+        """Latest managed run status for the resource's app (task waiting)."""
+        resource = self.resolve_resource(resource_id)
+        if resource is None or not resource.get("app_id"):
+            return None
+        db = get_runs_db()
+        run = db.latest_run_for_app(resource["app_id"]) if db else None
+        if run is None:
+            return None
+        return run.get("status")
+
+    def start_agent_session(self, adapter_id, project_id, prompt):
+        runner = get_agent_runner(self._cfg)
+        if runner is None:
+            return None, "运行历史数据库不可用"
+        return runner.start(adapter_id, project_id, prompt=prompt or "")
+
+    def stop_agent_session(self, session_id):
+        runner = get_agent_runner(self._cfg)
+        if runner is None:
+            return False, "运行历史数据库不可用"
+        return runner.stop(session_id)
+
+    def get_agent_session(self, session_id):
+        runner = get_agent_runner(self._cfg)
+        return runner.get_session(session_id) if runner else None
+
+    def agent_session_alive(self, session_id):
+        session = self.get_agent_session(session_id)
+        return bool(session and session.get("status") in (
+            "running", "starting"))
+
+    def project_root(self, project_id):
+        snapshot = self._snapshot()
+        project = next(
+            (p for p in snapshot.get("projects") or []
+             if p.get("id") == project_id), None)
+        return project.get("root_path") if project else None
+
+
+def get_workflow_executor(cfg=None):
+    """惰性创建 WorkflowExecutor（hooks 绑定 cfg）。"""
+    global WORKFLOW_EXECUTOR
+    if WORKFLOW_EXECUTOR is None:
+        with _workflow_executor_lock:
+            if WORKFLOW_EXECUTOR is None:
+                db = get_runs_db()
+                if db is None:
+                    return None
+                WORKFLOW_EXECUTOR = WorkflowExecutor(
+                    db=db,
+                    hooks=ServerExecutorHooks(cfg),
+                    locks=LockManager(),
+                    events=EVENTS)
+    if cfg is not None and WORKFLOW_EXECUTOR is not None:
+        if isinstance(WORKFLOW_EXECUTOR._hooks, ServerExecutorHooks):
+            WORKFLOW_EXECUTOR._hooks._cfg = cfg
+    return WORKFLOW_EXECUTOR
 
 
 def get_runs_db():
@@ -896,6 +1034,33 @@ def _public_session(session):
     }
 
 
+def _public_workflow_run(run, db):
+    """Workflow run API projection (steps included)."""
+    if run is None:
+        return None
+    step_runs = db.list_step_runs(run["id"]) if db else []
+    return {
+        "id": run.get("id"),
+        "workflowId": run.get("workflow_id"),
+        "workflowVersion": run.get("workflow_version"),
+        "projectId": run.get("project_id"),
+        "name": run.get("name"),
+        "status": run.get("status"),
+        "startedAt": run.get("started_at"),
+        "endedAt": run.get("ended_at"),
+        "steps": [{
+            "stepId": sr.get("step_id"),
+            "kind": sr.get("kind"),
+            "status": sr.get("status"),
+            "retries": sr.get("retries", 0),
+            "runRef": sr.get("run_ref"),
+            "startedAt": sr.get("started_at"),
+            "endedAt": sr.get("ended_at"),
+            "error": sr.get("error"),
+        } for sr in step_runs],
+    }
+
+
 def build_state(cfg, console_port, config_health=None):
     degraded_reasons = []
     # 一次 pgid 快照供 build_services / build_apps 共享，避免每轮两次全量 ps。
@@ -1240,6 +1405,9 @@ def start_run_guard(cfg):
                 runner = get_agent_runner(cfg)
                 if runner is not None:
                     runner.reconcile()
+                executor = get_workflow_executor(cfg)
+                if executor is not None:
+                    executor.recover()
             except Exception:
                 LOG.exception("运行监护失败")
     thread = threading.Thread(target=_guard, daemon=True)
@@ -2882,6 +3050,51 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.send_json(_public_session(session))
             return
+        if path == "/api/v1/workflows":
+            snapshot = self.server.cfg.snapshot()
+            self.send_json(snapshot.get("workflows") or [])
+            return
+        if path == "/api/v1/workflow-runs":
+            db = get_runs_db()
+            runs = db.list_workflow_runs(limit=50) if db else []
+            self.send_json({"runs": [_public_workflow_run(r, db)
+                                     for r in runs], "total": len(runs)})
+            return
+        if path.startswith("/api/v1/workflow-runs/"):
+            run_id = path[len("/api/v1/workflow-runs/"):]
+            db = get_runs_db()
+            run = db.get_workflow_run(run_id) if db else None
+            if run is None:
+                self.send_err(404, "工作流运行不存在")
+                return
+            self.send_json(_public_workflow_run(run, db))
+            return
+        if path == "/api/v1/git/worktrees":
+            snapshot = self.server.cfg.snapshot()
+            result = []
+            for project in snapshot.get("projects") or []:
+                repo = detect_repo(project.get("root_path"))
+                if repo is None:
+                    continue
+                result.append({
+                    "projectId": project.get("id"),
+                    "projectName": project.get("name"),
+                    "repo": repo,
+                    "worktrees": list_worktrees(repo),
+                })
+            self.send_json(result)
+            return
+        if path.startswith("/api/v1/workflows/"):
+            workflow_id = path[len("/api/v1/workflows/"):]
+            snapshot = self.server.cfg.snapshot()
+            workflow = next(
+                (w for w in snapshot.get("workflows") or []
+                 if w.get("id") == workflow_id), None)
+            if workflow is None:
+                self.send_err(404, "工作流不存在")
+                return
+            self.send_json(workflow)
+            return
         match = self.V1_ROUTE_RE.match(path)
         if not match:
             self.send_err(404, "接口不存在")
@@ -2985,6 +3198,87 @@ class Handler(BaseHTTPRequestHandler):
             self.discard_body()  # keep-alive 陷阱：不读掉会污染下一个请求
             self.handle_v1_resource_action(identifier, action)
             return
+        self.send_err(404, "接口不存在")
+
+    def handle_v1_workflow_post(self, path):
+        """/api/v1/workflows* 写路由：创建定义与运行/取消。"""
+        if path == "/api/v1/workflows":
+            data, err = self.read_json_body()
+            if err:
+                self.send_err(400, err)
+                return
+            project_id = str(data.get("projectId") or "").strip()
+            name = str(data.get("name") or "").strip()
+            steps = data.get("steps")
+            if not project_id or not name:
+                self.send_err(400, "projectId 与 name 必填")
+                return
+            if not isinstance(steps, list) or not steps:
+                self.send_err(400, "steps 必须是非空数组")
+                return
+            try:
+                from adcc.orchestrator import make_step
+                normalized = []
+                for raw in steps:
+                    if not isinstance(raw, dict):
+                        raise ValueError("step 必须是对象")
+                    normalized.append(make_step(
+                        kind=raw.get("kind"),
+                        config=raw.get("config") or {},
+                        needs=raw.get("needs"),
+                        timeout_sec=raw.get("timeoutSec"),
+                        retry_policy=raw.get("retryPolicy"),
+                        locks=raw.get("locks"),
+                        continue_on_error=bool(raw.get("continueOnError"))))
+                workflow = make_workflow(
+                    project_id=project_id, name=name, steps=normalized)
+            except ValueError as exc:
+                self.send_err(400, str(exc))
+                return
+
+            def op(c):
+                c.setdefault("workflows", []).append(workflow)
+            self.server.cfg.update(op)
+            self.send_json(workflow, 201)
+            return
+        if path.startswith("/api/v1/workflows/"):
+            remainder = path[len("/api/v1/workflows/"):]
+            if remainder.endswith("/runs"):
+                self.discard_body()
+                workflow_id = remainder[:-len("/runs")]
+                executor = get_workflow_executor(self.server.cfg)
+                if executor is None:
+                    self.send_err(503, "运行历史数据库不可用")
+                    return
+                snapshot = self.server.cfg.snapshot()
+                workflow = next(
+                    (w for w in snapshot.get("workflows") or []
+                     if w.get("id") == workflow_id), None)
+                if workflow is None:
+                    self.send_err(404, "工作流不存在")
+                    return
+                run, error = executor.start(
+                    workflow, workflow.get("project_id"))
+                if error:
+                    self.send_json({"ok": False, "error": error}, 400)
+                    return
+                self.send_json(_public_workflow_run(run, get_runs_db()), 201)
+                return
+        if path.startswith("/api/v1/workflow-runs/"):
+            run_id = path[len("/api/v1/workflow-runs/"):]
+            if run_id.endswith("/cancel"):
+                self.discard_body()
+                run_id = run_id[:-len("/cancel")]
+                executor = get_workflow_executor(self.server.cfg)
+                if executor is None:
+                    self.send_err(503, "运行历史数据库不可用")
+                    return
+                ok, error = executor.cancel(run_id)
+                if not ok:
+                    self.send_json({"ok": False, "error": error}, 409)
+                    return
+                self.send_json({"ok": True})
+                return
         self.send_err(404, "接口不存在")
 
     def handle_v1_agents_post(self, path):
@@ -3171,6 +3465,8 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/v1/"):
                 if path.startswith("/api/v1/agents/"):
                     self.handle_v1_agents_post(path)
+                elif path.startswith("/api/v1/workflow"):
+                    self.handle_v1_workflow_post(path)
                 else:
                     self.handle_v1_post(path)
                 return
@@ -4025,6 +4321,12 @@ def _run_console(preferred_port=None, open_browser=True):
             runner.reconcile()
         except Exception:
             LOG.exception("agent 会话对账失败")
+    executor = get_workflow_executor(cfg)
+    if executor is not None:
+        try:
+            executor.recover()
+        except Exception:
+            LOG.exception("工作流恢复失败")
     start_run_guard(cfg)
 
     server, port = None, None
