@@ -262,15 +262,18 @@ class AgentRunner:
         return True, None
 
     def _identity_ok(self, session):
-        """Current-user + run-marker check for the session controller."""
+        """Current-user + run-marker check for the session controller.
+
+        The marker appears as ``console-run:<token>`` in macOS bash argv
+        and as ``console-run-<token>`` in the Windows batch filename;
+        accept either spelling.
+        """
         pid = session.get("pid")
         token = session.get("run_token")
         if not isinstance(pid, int) or not isinstance(token, str):
             return False
         if not self._platform.pid_alive(pid):
             return False
-        marker = AGENT_MARKER + token
-        import adcc.runtime.processes as processes
         snapshot = {}
         try:
             snapshot = self._platform.process_snapshot([pid], with_uid=True)
@@ -279,7 +282,9 @@ class AgentRunner:
         entry = snapshot.get(pid, {})
         if entry.get("uid") != self._current_user:
             return False
-        return marker in entry.get("args", "")
+        args = entry.get("args", "")
+        return ("console-run:" + token in args
+                or "console-run-" + token in args)
 
     def reconcile(self):
         """Daemon restart: verify running sessions; vanish → lost."""
