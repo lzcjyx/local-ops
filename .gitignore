@@ -31,3 +31,5 @@ release/
 *.zip
 *.tar.gz
 *.sha256
+desktop/src-tauri/target/
+desktop/src-tauri/gen/

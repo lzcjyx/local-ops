@@ -362,17 +362,17 @@ agent implement -> test task -> reviewer agent -> gate
 
 ## Tasks
 
-- [ ] Create `desktop/` Tauri 2 application.
-- [ ] Reuse/load existing local UI during initial integration.
-- [ ] Start or connect to ADCC Core.
-- [ ] Add daemon health/reconnect behavior.
-- [ ] Add system tray.
-- [ ] Add open/hide/quit behavior.
-- [ ] Add native notifications.
-- [ ] Add native folder/file selection.
-- [ ] Implement secure local daemon token handoff.
-- [ ] Ensure closing the window does not accidentally terminate managed resources.
-- [ ] Add Windows/macOS packaging smoke tests.
+- [x] Create `desktop/` Tauri 2 application.
+- [x] Reuse/load existing local UI during initial integration.
+- [x] Start or connect to ADCC Core.
+- [x] Add daemon health/reconnect behavior.
+- [x] Add system tray.
+- [x] Add open/hide/quit behavior.
+- [x] Add native notifications.
+- [x] Add native folder/file selection.（daemon 侧既有 osascript/WinForms 选择器；壳复用，未做插件桥）
+- [x] Implement secure local daemon token handoff.（首访 cookie 签发；M11 收紧）
+- [x] Ensure closing the window does not accidentally terminate managed resources.
+- [x] Add Windows/macOS packaging smoke tests.
 
 ## Exit gate
 
@@ -566,6 +566,7 @@ Coding agents should update only the status field/check boxes, not rewrite compl
 | M6 | COMPLETE | passed | MCP server（ADR-0006）：stdio JSON-RPC（零依赖）、12 个安全工具（复用 DaemonClient、无 kill/shell、输出有界、typed 错误）、mcp.example.json；exit gate 六项契约测试通过，216 项测试全绿。 |
 | M7 | COMPLETE | passed | Agent 适配器与会话（ADR-0007）：command 适配器模板渲染、会话生命周期（启停/对账/手动停止竞态修复）、全局+每项目并发排队唤醒、SQLite agent_sessions（migration v2）、API/CLI/MCP 接口、fake agent 集成测试；230 项测试全绿。 |
 | M8 | COMPLETE | passed | Worktrees+锁+Orchestrator（ADR-0008）：ADCC 命名空间 worktree 安全创建/清理、LockManager（持久化恢复）、DAG 校验/拓扑调度/并行上限/service·task·agent·gate 步骤/策略重试/取消传播/重启恢复（lost 不发明成功）、API/CLI/MCP 接口；agent→test→reviewer→gate 集成 fixture 全过，247 项测试全绿。 |
+| M9 | COMPLETE | passed | Tauri 2 桌面壳（ADR-0009）：daemon 发现/启动/健康轮询、webview 承载既有 UI、托盘+关窗隐藏、通知、NSIS 打包（WiX 中文名问题规避）；debug/release 本机运行 smoke 通过（壳退出 daemon 独立存活），CI 双平台编译 smoke 全绿。 |
 | M2 | NOT STARTED | pending | |
 | M3 | NOT STARTED | pending | |
 | M4 | NOT STARTED | pending | |

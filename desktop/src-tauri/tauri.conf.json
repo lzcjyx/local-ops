@@ -1,0 +1,50 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "总控台",
+  "version": "1.0.0",
+  "identifier": "cn.adcc.console",
+  "build": {
+    "frontendDist": "../../static"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "总控台",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 960,
+        "minHeight": 600,
+        "center": true
+      }
+    ],
+    "trayIcon": {
+      "id": "main",
+      "iconPath": "icons/32x32.png",
+      "tooltip": "总控台"
+    },
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": [
+      "../../server.py",
+      "../../adcc",
+      "../../static",
+      "../../VERSION",
+      "../../LICENSE"
+    ],
+    "shortDescription": "本地服务监控与快速启动控制台",
+    "longDescription": "总控台桌面壳：启动/连接本地 daemon，托盘常驻，关闭窗口不终止受管服务。"
+  }
+}
