@@ -2745,6 +2745,12 @@ class Handler(BaseHTTPRequestHandler):
         except (KeyError, TypeError, ValueError):
             return False
 
+    def _has_daemon_token(self):
+        """X-ADCC-Token header：CLI/MCP 使用的本地 daemon 令牌（M11）。"""
+        token = (self.headers.get("X-ADCC-Token") or "").strip()
+        return bool(token and secrets.compare_digest(
+            token, self.server.control_token))
+
     def _deny_request(self, status, message):
         # Do not consume attacker-controlled bodies. Closing after the bounded
         # JSON error prevents keep-alive request smuggling via leftover bytes.
@@ -2761,12 +2767,12 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def authorize_request(self, mutating=False, content_kind=None):
-        """Enforce the loopback browser trust boundary.
+        """Enforce the loopback trust boundary (M11: mutating requires proof).
 
         Browser writes require exact same-origin metadata plus the HttpOnly
-        session cookie issued by this process. Headerless local CLI clients stay
-        compatible, but JSON/image Content-Type rules keep those paths
-        unavailable to simple cross-site HTML forms.
+        session cookie; headerless CLI/MCP clients must present the
+        ``X-ADCC-Token`` daemon token (from daemon.json).  Either proof is
+        accepted; both are compared in constant time.
         """
         host = self._parsed_request_host()
         if host is None or not self._request_host_allowed():
@@ -2780,8 +2786,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._deny_request(403, "拒绝跨站控制请求")
         if origin and not self._same_origin(origin, host):
             return self._deny_request(403, "请求 Origin 不是当前控制台")
-        if (site or origin) and not self._has_control_cookie():
+        has_cookie = self._has_control_cookie()
+        if (site or origin) and not has_cookie:
             return self._deny_request(403, "控制会话已失效，请刷新页面")
+        # M11：所有写操作必须有本地凭证（cookie 或 daemon token）
+        if not has_cookie and not self._has_daemon_token():
+            return self._deny_request(403, "缺少本地控制凭证（cookie 或 X-ADCC-Token）")
 
         if self.headers.get("Transfer-Encoding"):
             return self._deny_request(400, "不支持 Transfer-Encoding 请求体")

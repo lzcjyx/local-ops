@@ -135,8 +135,12 @@ class RunDatabase:
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        with self._lock:
-            self._migrate()
+        try:
+            with self._lock:
+                self._migrate()
+        except Exception:
+            self._conn.close()
+            raise
 
     def _migrate(self):
         cursor = self._conn.cursor()

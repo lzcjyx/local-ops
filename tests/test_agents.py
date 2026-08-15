@@ -99,7 +99,8 @@ class AgentHarness:
     def request(self, method, path, body=None):
         import http.client
         conn = http.client.HTTPConnection(server.HOST, self.port, timeout=20)
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json",
+                  "X-ADCC-Token": self.httpd.control_token}
         conn.request(method, path,
                      body=json.dumps(body) if body is not None else "{}",
                      headers=headers)
@@ -166,6 +167,31 @@ class ModelTests(unittest.TestCase):
                                args_template=["{unknown_var}"])
         self.assertEqual(render_command(adapter, {"session_id": "a"}),
                          ["e", "{unknown_var}"])
+
+    def test_template_values_never_inject_shell(self):
+        """M11：占位符值含 shell 元字符时，argv 模式原样传递（无注入）。"""
+        adapter = make_adapter(
+            name="x", executable="opencode",
+            args_template=["run", "--prompt-file", "{prompt_file}"],
+            env_template={"ADCC_PROMPT_FILE": "{prompt_file}"})
+        variables = {
+            "prompt_file": "/tmp/x; rm -rf /home",
+            "session_id": "s1",
+        }
+        argv = render_command(adapter, variables)
+        self.assertEqual(argv[-1], "/tmp/x; rm -rf /home")
+        # argv 是单参数（不经过 shell 解释）；占位符原样、无拼接
+        self.assertEqual(len(argv), 4)
+        self.assertEqual(render_env(adapter, variables)["ADCC_PROMPT_FILE"],
+                         "/tmp/x; rm -rf /home")
+
+    def test_adapter_executable_is_rendered_as_plain_argument(self):
+        adapter = make_adapter(
+            name="x", executable="runner",
+            args_template=["{prompt_file}"])
+        variables = {"prompt_file": '"a;b" & c'}
+        argv = render_command(adapter, variables)
+        self.assertEqual(argv, ["runner", '"a;b" & c'])
 
     def test_session_validation(self):
         from adcc.agents.models import make_session

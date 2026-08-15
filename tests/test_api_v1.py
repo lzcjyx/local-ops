@@ -58,6 +58,8 @@ class V1Harness:
         if body is not None and not isinstance(body, (bytes, bytearray)):
             body = json.dumps(body)
             request_headers.setdefault("Content-Type", "application/json")
+        request_headers.setdefault("X-ADCC-Token", self.httpd.control_token)
+        request_headers.setdefault("X-ADCC-Token", self.httpd.control_token)
         conn.request(method, path, body=body, headers=request_headers)
         response = conn.getresponse()
         raw = response.read()

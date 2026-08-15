@@ -105,3 +105,12 @@ jobs:
       - name: Build desktop shell (compile smoke)
         run: cargo build --release
         working-directory: desktop/src-tauri
+
+      - name: Package macOS bundle (app/dmg smoke)
+        if: runner.os == 'macOS'
+        run: |
+          cargo install tauri-cli --version "^2" --locked
+          cargo tauri build
+        working-directory: desktop/src-tauri
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

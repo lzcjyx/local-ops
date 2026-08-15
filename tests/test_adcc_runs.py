@@ -3,6 +3,7 @@
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 from adcc.runtime.runs import (
     RUN_KINDS,
@@ -117,6 +118,17 @@ class RunDatabaseTests(unittest.TestCase):
             self.assertEqual(reopened.get_run(run["id"])["id"], run["id"])
         finally:
             reopened.close()
+
+    def test_corrupt_database_does_not_break_server_lifecycle(self):
+        """M11：损坏的 SQLite 文件导致打开失败时，daemon 必须降级而非崩溃。"""
+        import server as server_module
+        corrupt = os.path.join(self.directory.name, "corrupt.sqlite3")
+        with open(corrupt, "wb") as handle:
+            handle.write(b"this is not a sqlite database at all" * 8)
+        with mock.patch.object(server_module, "RUNS_DB_PATH", corrupt), \
+                mock.patch.object(server_module, "RUNS_DB", None):
+            db = server_module.get_runs_db()
+            self.assertIsNone(db)  # 降级：返回 None，不影响其他功能
 
 
 if __name__ == "__main__":

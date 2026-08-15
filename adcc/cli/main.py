@@ -77,6 +77,8 @@ class DaemonClient:
     def request(self, method, path, body=None, timeout=15):
         data = None
         headers = {"Accept": "application/json"}
+        if self.endpoint.get("token"):
+            headers["X-ADCC-Token"] = self.endpoint["token"]
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"

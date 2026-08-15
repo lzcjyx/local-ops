@@ -120,7 +120,7 @@ class OrchestratorHarness:
             body["port"] = port
         conn = http.client.HTTPConnection(server.HOST, self.port, timeout=15)
         conn.request("POST", "/api/apps", json.dumps(body),
-                     {"Content-Type": "application/json"})
+                     {"Content-Type": "application/json", "X-ADCC-Token": self.httpd.control_token})
         response = conn.getresponse()
         created = json.loads(response.read().decode("utf-8"))
         conn.close()

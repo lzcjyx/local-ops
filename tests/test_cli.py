@@ -62,7 +62,7 @@ class CliHarness:
         with open(os.path.join(self.data_dir, cli.ENDPOINT_FILENAME),
                   "w", encoding="utf-8") as handle:
             json.dump({"port": self.port, "pid": os.getpid(),
-                       "token": "test-token"}, handle)
+                       "token": self.httpd.control_token}, handle)
 
     def close(self):
         db = server.get_runs_db()
@@ -133,7 +133,8 @@ class CliLiveDaemonTests(unittest.TestCase):
         conn = http.client.HTTPConnection(server.HOST, self.h.port, timeout=10)
         conn.request("POST", V1 + "/projects",
                      json.dumps({"name": "博客", "rootPath": r"C:\dev\blog"}),
-                     {"Content-Type": "application/json"})
+                     {"Content-Type": "application/json",
+                      "X-ADCC-Token": self.h.httpd.control_token})
         response = conn.getresponse()
         project = json.loads(response.read().decode("utf-8"))
         conn.close()
@@ -168,7 +169,8 @@ class CliLiveDaemonTests(unittest.TestCase):
         with mock.patch.object(server, "scan_listeners", return_value=set()):
             conn = http.client.HTTPConnection(server.HOST, self.h.port, timeout=10)
             conn.request("POST", "/api/apps/abcd0001/start", "{}",
-                         {"Content-Type": "application/json"})
+                         {"Content-Type": "application/json",
+                          "X-ADCC-Token": self.h.httpd.control_token})
             response = conn.getresponse()
             conn.close()
         self.assertEqual(response.status, 200)
@@ -197,7 +199,8 @@ class CliLiveDaemonTests(unittest.TestCase):
                                  "command": "python -m http.server %d" % port,
                                  "cwd": self.h.tmp.name, "port": port,
                                  "kind": "service"}),
-                     {"Content-Type": "application/json"})
+                     {"Content-Type": "application/json",
+                      "X-ADCC-Token": self.h.httpd.control_token})
         response = conn.getresponse()
         app = json.loads(response.read().decode("utf-8"))
         conn.close()

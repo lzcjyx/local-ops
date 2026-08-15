@@ -34,10 +34,13 @@ class HttpHarness:
         self.thread.join(timeout=2)
         self.tmp.cleanup()
 
-    def request(self, method, path, body=None, headers=None):
+    def request(self, method, path, body=None, headers=None, with_token=True):
         # 15s：Windows 首次 /api/state 需冷启动一次 CIM 全量查询（~2-5s）
         conn = http.client.HTTPConnection(server.HOST, self.port, timeout=15)
         request_headers = dict(headers or {})
+        if with_token and "X-ADCC-Token" not in request_headers:
+            # M11：mutating 请求需要本地凭证；默认带 daemon token
+            request_headers["X-ADCC-Token"] = self.httpd.control_token
         if body is not None and not isinstance(body, (bytes, bytearray)):
             body = body.encode("utf-8")
         conn.request(method, path, body=body, headers=request_headers)
@@ -100,7 +103,7 @@ class HttpSecurityTests(unittest.TestCase):
     def test_same_origin_browser_write_requires_valid_http_only_session(self):
         status, _, _ = self.h.request(
             "POST", "/api/ui/theme", json.dumps({"theme": "ops"}),
-            self._browser_headers())
+            self._browser_headers(), with_token=False)
         self.assertEqual(status, 403)
 
         cookie = self._session_cookie()
@@ -110,6 +113,26 @@ class HttpSecurityTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(body["ok"])
         self.assertEqual(self.h.cfg.snapshot()["uiTheme"], "ops")
+
+    def test_mutating_requires_local_credential(self):
+        """M11：写操作必须携带 cookie 或 X-ADCC-Token，否则 403。"""
+        status, body, _ = self.h.request(
+            "POST", "/api/ui/theme", json.dumps({"theme": "ops"}),
+            {"Content-Type": "application/json"}, with_token=False)
+        self.assertEqual(status, 403)
+        self.assertFalse(body["ok"])
+        status, body, _ = self.h.request(
+            "POST", "/api/ui/theme", json.dumps({"theme": "ops"}),
+            {"Content-Type": "application/json",
+             "X-ADCC-Token": "wrong-token"}, with_token=False)
+        self.assertEqual(status, 403)
+        self.assertFalse(body["ok"])
+        status, body, _ = self.h.request(
+            "POST", "/api/ui/theme", json.dumps({"theme": "ops"}),
+            {"Content-Type": "application/json",
+             "X-ADCC-Token": self.h.httpd.control_token}, with_token=False)
+        self.assertEqual(status, 200)
+        self.assertTrue(body["ok"])
 
     def test_simple_form_post_cannot_reach_bodyless_control_action(self):
         status, body, _ = self.h.request(
@@ -121,7 +144,8 @@ class HttpSecurityTests(unittest.TestCase):
         status, _, _ = self.h.request("GET", "/")
         self.assertEqual(status, 200)
 
-    def test_headerless_local_cli_json_remains_compatible(self):
+    def test_headerless_local_cli_with_token_remains_compatible(self):
+        """无头本地 CLI 携带 X-ADCC-Token 后照常工作。"""
         status, body, _ = self.h.request(
             "POST", "/api/ui/theme", json.dumps({"theme": "ops"}),
             {"Content-Type": "application/json"})

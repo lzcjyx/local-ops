@@ -72,7 +72,7 @@ class McpDaemonHarness:
         with open(os.path.join(self.data_dir, "daemon.json"),
                   "w", encoding="utf-8") as handle:
             json.dump({"port": self.port, "pid": os.getpid(),
-                       "token": "test"}, handle)
+                       "token": self.httpd.control_token}, handle)
         root = os.path.dirname(os.path.abspath(server.__file__))
         self.mcp = subprocess.Popen(
             [sys.executable, "-m", "adcc.mcp.server",
@@ -198,7 +198,8 @@ class McpToolCallTests(unittest.TestCase):
         import http.client
         conn = http.client.HTTPConnection(server.HOST, self.h.port, timeout=10)
         conn.request("POST", "/api/apps", json.dumps(body),
-                     {"Content-Type": "application/json"})
+                     {"Content-Type": "application/json",
+                      "X-ADCC-Token": self.h.httpd.control_token})
         response = conn.getresponse()
         created = json.loads(response.read().decode("utf-8"))
         conn.close()
