@@ -1,0 +1,8 @@
+{
+  "$schema": "https://modelcontextprotocol.io/schema/2024-11-05/schema.json",
+  "name": "adcc",
+  "command": "python",
+  "args": ["-m", "adcc.mcp.server"],
+  "cwd": "/path/to/local-ops",
+  "env": {}
+}

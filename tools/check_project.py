@@ -124,6 +124,8 @@ def check_required_files() -> str:
         "adcc/core/errors.py",
         "adcc/core/events.py",
         "adcc/core/models.py",
+        "adcc/mcp/__init__.py",
+        "adcc/mcp/server.py",
         "adcc/platform/__init__.py",
         "adcc/platform/base.py",
         "adcc/platform/macos.py",
