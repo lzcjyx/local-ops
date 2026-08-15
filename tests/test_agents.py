@@ -249,7 +249,8 @@ class RunnerIntegrationTests(unittest.TestCase):
         policy = {"global_max": 2, "per_project_max": 1}
         self.h.cfg.update(lambda d: d.__setitem__("agent_policy", policy))
         try:
-            adapter = self._adapter(exit_code=0, duration=3)
+            # 长 duration：避免 CI 慢机器上 agent 在 stop 前自然退出
+            adapter = self._adapter(exit_code=0, duration=30)
             first, error = self.h.runner.start(
                 adapter["id"], self.h.project_id, prompt="1")
             self.assertIsNone(error)
@@ -269,7 +270,8 @@ class RunnerIntegrationTests(unittest.TestCase):
                 time.sleep(0.3)
             self.assertIn(current["status"], ("running", "succeeded", "failed"))
             if current["status"] == "running":
-                self.h.runner.stop(second["id"])
+                ok, stop_error = self.h.runner.stop(second["id"])
+                self.assertTrue(ok, stop_error)
         finally:
             self.h.cfg.update(lambda d: d.__setitem__("agent_policy", {}))
 
@@ -277,7 +279,7 @@ class RunnerIntegrationTests(unittest.TestCase):
         policy = {"global_max": 1, "per_project_max": 5}
         self.h.cfg.update(lambda d: d.__setitem__("agent_policy", policy))
         try:
-            adapter = self._adapter(exit_code=0, duration=3)
+            adapter = self._adapter(exit_code=0, duration=30)
             first, error = self.h.runner.start(
                 adapter["id"], self.h.project_id, prompt="1")
             self.assertIsNone(error)
@@ -285,7 +287,8 @@ class RunnerIntegrationTests(unittest.TestCase):
                 adapter["id"], self.h.project_id, prompt="2")
             self.assertIsNone(error)
             self.assertEqual(second["status"], "queued")
-            self.h.runner.stop(first["id"])
+            ok, stop_error = self.h.runner.stop(first["id"])
+            self.assertTrue(ok, stop_error)
             # 第一个结束后唤醒排队会话；测试结束前清理可能被唤醒的进程
             deadline = time.time() + 10
             while time.time() < deadline:
@@ -295,7 +298,8 @@ class RunnerIntegrationTests(unittest.TestCase):
                     break
                 time.sleep(0.3)
             if current["status"] == "running":
-                self.h.runner.stop(second["id"])
+                ok, stop_error = self.h.runner.stop(second["id"])
+                self.assertTrue(ok, stop_error)
         finally:
             self.h.cfg.update(lambda d: d.__setitem__("agent_policy", {}))
 
@@ -308,7 +312,7 @@ class RunnerIntegrationTests(unittest.TestCase):
         policy = {"global_max": 1, "per_project_max": 5}
         self.h.cfg.update(lambda d: d.__setitem__("agent_policy", policy))
         try:
-            adapter = self._adapter(exit_code=0, duration=3)
+            adapter = self._adapter(exit_code=0, duration=30)
             first, error = self.h.runner.start(
                 adapter["id"], self.h.project_id, prompt="1")
             self.assertIsNone(error)
@@ -319,7 +323,8 @@ class RunnerIntegrationTests(unittest.TestCase):
             self.assertTrue(ok, stop_error)
             self.assertEqual(
                 self.h.runner.get_session(second["id"])["status"], "canceled")
-            self.h.runner.stop(first["id"])
+            ok, stop_error = self.h.runner.stop(first["id"])
+            self.assertTrue(ok, stop_error)
         finally:
             self.h.cfg.update(lambda d: d.__setitem__("agent_policy", {}))
 

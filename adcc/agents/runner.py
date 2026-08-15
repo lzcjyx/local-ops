@@ -193,18 +193,22 @@ class AgentRunner:
 
     def _watch(self, session_id, proc, token, started_at):
         def _wait():
-            code = proc.wait()
-            ended_at = time.time()
-            self._finish(session_id, code, manual_stop=False,
-                         ended_at=ended_at)
             try:
-                if os.name == "nt":
-                    os.remove(os.path.join(
-                        os.environ.get("TEMP", os.path.expanduser("~")),
-                        "console-run-%s.cmd" % token))
-            except OSError:
+                code = proc.wait()
+                ended_at = time.time()
+                self._finish(session_id, code, manual_stop=False,
+                             ended_at=ended_at)
+                try:
+                    if os.name == "nt":
+                        os.remove(os.path.join(
+                            os.environ.get("TEMP", os.path.expanduser("~")),
+                            "console-run-%s.cmd" % token))
+                except OSError:
+                    pass
+                self._wake_queued()
+            except Exception:
+                # 进程已退出但 DB 可能已关闭（daemon 停止场景）：静默收尾
                 pass
-            self._wake_queued()
         thread = threading.Thread(target=_wait, daemon=True)
         thread.start()
 
