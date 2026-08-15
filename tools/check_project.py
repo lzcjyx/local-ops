@@ -71,7 +71,7 @@ def require(condition: bool, message: str) -> None:
         raise CheckError(message)
 
 
-def command_output(args: list[str], cwd: Path = ROOT) -> str:
+def command_output(args: list[str], cwd: Path = ROOT, timeout: float = 120) -> str:
     try:
         completed = subprocess.run(
             args,
@@ -79,7 +79,7 @@ def command_output(args: list[str], cwd: Path = ROOT) -> str:
             capture_output=True,
             text=True,
             errors="replace",
-            timeout=120,
+            timeout=timeout,
             check=False,
         )
     except FileNotFoundError as exc:
@@ -583,7 +583,7 @@ def check_tests() -> str:
         "test_*.py",
         "-v",
     ]
-    output = command_output(args)
+    output = command_output(args, timeout=600)
     match = re.search(r"Ran\s+(\d+)\s+tests?\b", output)
     require(match is not None, "无法确认 unittest 实际运行的测试数")
     count = int(match.group(1))

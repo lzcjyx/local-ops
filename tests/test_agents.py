@@ -112,6 +112,14 @@ class AgentHarness:
             return response.status, raw
 
     def close(self):
+        runner = server.get_agent_runner(self.cfg)
+        if runner is not None:
+            for session in runner.list_sessions(limit=100):
+                if session.get("status") == "running":
+                    try:
+                        runner.stop(session["id"])
+                    except Exception:
+                        pass
         db = server.get_runs_db()
         if db is not None:
             db.close()
@@ -121,7 +129,7 @@ class AgentHarness:
         self.httpd.shutdown()
         self.httpd.server_close()
         self.thread.join(timeout=2)
-        time.sleep(0.8)
+        time.sleep(1.2)  # 等待 watch 线程完成日志轮转，避免与清理竞态
         self.tmp.cleanup()
 
 
