@@ -304,8 +304,51 @@ def cmd_runs_list(client, args):
     return EXIT_OK
 
 
+def cmd_agents_list(client, args):
+    query = "?limit=%d" % (args.limit or 50)
+    status, body = client.get("/api/v1/agents/sessions" + query)
+    if status != 200:
+        raise ApiError(body.get("error", "获取会话失败"), status)
+    if args.json:
+        emit(body, True)
+        return EXIT_OK
+    for session in body.get("sessions") or []:
+        duration = session.get("durationSec")
+        duration = ("%.1fs" % duration) if duration is not None else "-"
+        print("%s  %-10s %-8s pid=%-6s %s" % (
+            session.get("id"), session.get("adapterId"),
+            session.get("status"), session.get("pid") or "-", duration))
+    return EXIT_OK
+
+
+def cmd_agent_run(client, args):
+    body = {"adapterId": args.adapter_id, "projectId": args.project_id}
+    if args.prompt_file:
+        body["promptFile"] = args.prompt_file
+    if args.prompt:
+        body["prompt"] = args.prompt
+    status, response = client.post("/api/v1/agents/sessions", body)
+    if status == 201:
+        session = response
+        if args.json:
+            emit(session, True)
+        else:
+            print("会话 %s 已启动（%s）" % (session.get("id"),
+                                        session.get("status")))
+        return EXIT_OK
+    raise ApiError(response.get("error", "启动会话失败"), status)
+
+
+def cmd_agent_stop(client, args):
+    status, response = client.post(
+        "/api/v1/agents/sessions/%s/stop" % args.session_id)
+    if status == 200 and response.get("ok", True):
+        emit(response, False)
+        return EXIT_OK
+    raise ApiError(response.get("error", "停止会话失败"), status)
+
+
 def cmd_logs(client, args):
-    """Logs by run id (preferred) or resource/app id; --follow polls tail."""
     target = args.run_id
     run_id = None
     status, body = client.get("/api/v1/runs/" + target)
@@ -397,6 +440,23 @@ def build_parser():
     logs.add_argument("--follow", action="store_true")
     logs.add_argument("--timeout", type=float, default=0,
                       help="--follow 的最长跟踪秒数（默认无限）")
+
+    agents = sub.add_parser("agents", help="agent 会话")
+    agents_sub = agents.add_subparsers(dest="sub", required=True)
+    agents_list = agents_sub.add_parser("list", help="列出会话")
+    agents_list.add_argument("--limit", type=int, default=50)
+    agents_list.add_argument("--json", action="store_true")
+
+    agent = sub.add_parser("agent", help="agent 操作")
+    agent_sub = agent.add_subparsers(dest="sub", required=True)
+    agent_run = agent_sub.add_parser("run", help="启动 agent 会话")
+    agent_run.add_argument("--project", dest="project_id", required=True)
+    agent_run.add_argument("--adapter", dest="adapter_id", required=True)
+    agent_run.add_argument("--prompt-file", dest="prompt_file")
+    agent_run.add_argument("--prompt")
+    agent_run.add_argument("--json", action="store_true")
+    agent_stop = agent_sub.add_parser("stop", help="停止会话")
+    agent_stop.add_argument("session_id")
     return parser
 
 
@@ -423,6 +483,10 @@ def main(argv=None):
         "port": cmd_port_owner,
         "runs": cmd_runs_list,
         "logs": cmd_logs,
+        "agents": cmd_agents_list,
+        "agent": lambda client, args: (
+            cmd_agent_run(client, args) if args.sub == "run"
+            else cmd_agent_stop(client, args)),
     }
     try:
         args.command  # noqa: B018

@@ -18,6 +18,8 @@ CONFIG_DEFAULT = {
     "workspaces": [],
     "projects": [],
     "resources": [],
+    "agent_adapters": [],
+    "agent_policy": {"global_max": 3, "per_project_max": 1},
 }
 
 APP_DEFAULT = {

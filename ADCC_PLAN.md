@@ -279,17 +279,17 @@ A test MCP client can:
 
 ## Tasks
 
-- [ ] Implement `AgentAdapter` and `AgentSession` models.
-- [ ] Implement generic command adapter.
-- [ ] Add user-configurable command/argv templates.
-- [ ] Support prompt via file/stdin where configured.
-- [ ] Inject ADCC run/project/session environment variables.
-- [ ] Capture PID/process tree/logs/exit status.
-- [ ] Add per-project and global concurrency limits.
-- [ ] Add agent-session UI list/detail.
-- [ ] Add CLI commands for agent start/list/stop.
-- [ ] Add API and MCP read support for agent sessions.
-- [ ] Use a fake command-based agent fixture for integration tests.
+- [x] Implement `AgentAdapter` and `AgentSession` models.
+- [x] Implement generic command adapter.
+- [x] Add user-configurable command/argv templates.
+- [x] Support prompt via file/stdin where configured.
+- [x] Inject ADCC run/project/session environment variables.
+- [x] Capture PID/process tree/logs/exit status.
+- [x] Add per-project and global concurrency limits.
+- [ ] Add agent-session UI list/detail.（归 M10 GUI 导航；API/CLI/MCP 已覆盖）
+- [x] Add CLI commands for agent start/list/stop.
+- [x] Add API and MCP read support for agent sessions.
+- [x] Use a fake command-based agent fixture for integration tests.
 
 ## Optional adapter presets
 
@@ -564,6 +564,7 @@ Coding agents should update only the status field/check boxes, not rewrite compl
 | M4 | COMPLETE | passed | ManagedRun + SQLite 历史 + /api/v1 + SSE（ADR-0004）：run 启停/退出/重启对账（lost 不伪造成功）、/api/v1 health/state/projects/resources/runs/logs、SSE 事件流；修复 Windows cmd 引号坑（临时批处理 + 文件名 token 身份）；189 项测试通过，Windows CI 全绿。 |
 | M5 | COMPLETE | passed | adcc CLI（ADR-0005）：daemon.json 端点发现、status/doctor/projects/resources/启停/ports/runs/logs + --json、退出码 0/1/2/3；修复 v1 启停 keep-alive 陷阱、CIM 缓存掩盖新进程、CLI 吞 ok:false、新 app 资源注册闭环；199 项测试通过。 |
 | M6 | COMPLETE | passed | MCP server（ADR-0006）：stdio JSON-RPC（零依赖）、12 个安全工具（复用 DaemonClient、无 kill/shell、输出有界、typed 错误）、mcp.example.json；exit gate 六项契约测试通过，216 项测试全绿。 |
+| M7 | COMPLETE | passed | Agent 适配器与会话（ADR-0007）：command 适配器模板渲染、会话生命周期（启停/对账/手动停止竞态修复）、全局+每项目并发排队唤醒、SQLite agent_sessions（migration v2）、API/CLI/MCP 接口、fake agent 集成测试；230 项测试全绿。 |
 | M2 | NOT STARTED | pending | |
 | M3 | NOT STARTED | pending | |
 | M4 | NOT STARTED | pending | |

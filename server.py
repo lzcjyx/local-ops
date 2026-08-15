@@ -44,6 +44,7 @@ from adcc.core.constants import (
 )
 from adcc.core.errors import ConfigSchemaError, FutureConfigSchemaError
 from adcc.core.events import EventBus
+from adcc.agents import AgentRunner, make_adapter, validate_adapter
 from adcc.platform import get_platform_adapter
 from adcc.projects import (
     assign_resources_from_apps,
@@ -176,6 +177,27 @@ RUNS_DB_PATH = os.path.join(DATA_DIR, "console.sqlite3")
 EVENTS = EventBus()
 RUNS_DB = None
 _runs_db_lock = threading.Lock()
+AGENT_RUNNER = None
+_agent_runner_lock = threading.Lock()
+
+
+def get_agent_runner(cfg=None):
+    """惰性创建 AgentRunner（依赖 DB 与数据目录就绪后）。"""
+    global AGENT_RUNNER
+    if AGENT_RUNNER is None:
+        with _agent_runner_lock:
+            if AGENT_RUNNER is None:
+                db = get_runs_db()
+                if db is None:
+                    return None
+                AGENT_RUNNER = AgentRunner(
+                    cfg=cfg, db=db, platform=PLATFORM,
+                    logs_dir=LOGS_DIR,
+                    prompts_dir=os.path.join(DATA_DIR, "prompts"),
+                    current_user=SELF_UID, events=EVENTS)
+    if cfg is not None and AGENT_RUNNER is not None and AGENT_RUNNER._cfg is None:
+        AGENT_RUNNER._cfg = cfg
+    return AGENT_RUNNER
 
 
 def get_runs_db():
@@ -844,6 +866,36 @@ def _v1_runs(query):
     return {"runs": [public_run(run) for run in runs], "total": len(runs)}
 
 
+def _v1_int(value, default):
+    try:
+        return max(1, min(int(value), 500))
+    except (TypeError, ValueError):
+        return default
+
+
+def _public_session(session):
+    """Agent session API projection."""
+    if session is None:
+        return None
+    return {
+        "id": session.get("id"),
+        "projectId": session.get("project_id"),
+        "adapterId": session.get("adapter_id"),
+        "workflowRunId": session.get("workflow_run_id"),
+        "workflowStepId": session.get("workflow_step_id"),
+        "status": session.get("status"),
+        "pid": session.get("pid"),
+        "startedAt": session.get("started_at"),
+        "endedAt": session.get("ended_at"),
+        "exitCode": session.get("exit_code"),
+        "logPath": session.get("log_path"),
+        "promptRef": session.get("prompt_ref"),
+        "durationSec": (
+            round(max(0.0, session["ended_at"] - session["started_at"]), 3)
+            if session.get("ended_at") and session.get("started_at") else None),
+    }
+
+
 def build_state(cfg, console_port, config_health=None):
     degraded_reasons = []
     # 一次 pgid 快照供 build_services / build_apps 共享，避免每轮两次全量 ps。
@@ -1185,6 +1237,9 @@ def start_run_guard(cfg):
             time.sleep(15)
             try:
                 reconcile_runs(cfg)
+                runner = get_agent_runner(cfg)
+                if runner is not None:
+                    runner.reconcile()
             except Exception:
                 LOG.exception("运行监护失败")
     thread = threading.Thread(target=_guard, daemon=True)
@@ -2800,6 +2855,33 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/v1/runs":
             self.send_json(_v1_runs(self._v1_run_query(query)))
             return
+        if path == "/api/v1/agents/adapters":
+            runner = get_agent_runner(self.server.cfg)
+            self.send_json(runner.list_adapters() if runner else [])
+            return
+        if path == "/api/v1/agents/sessions":
+            runner = get_agent_runner(self.server.cfg)
+            if runner is None:
+                self.send_json({"sessions": [], "total": 0})
+                return
+            params = urllib.parse.parse_qs(query)
+            sessions = runner.list_sessions(
+                limit=_v1_int(params.get("limit", ["50"])[0], 50),
+                status=params.get("status", [None])[0] or None)
+            self.send_json({
+                "sessions": [_public_session(s) for s in sessions],
+                "total": len(sessions),
+            })
+            return
+        if path.startswith("/api/v1/agents/sessions/"):
+            runner = get_agent_runner(self.server.cfg)
+            session_id = path[len("/api/v1/agents/sessions/"):]
+            session = runner.get_session(session_id) if runner else None
+            if session is None:
+                self.send_err(404, "会话不存在")
+                return
+            self.send_json(_public_session(session))
+            return
         match = self.V1_ROUTE_RE.match(path)
         if not match:
             self.send_err(404, "接口不存在")
@@ -2903,6 +2985,71 @@ class Handler(BaseHTTPRequestHandler):
             self.discard_body()  # keep-alive 陷阱：不读掉会污染下一个请求
             self.handle_v1_resource_action(identifier, action)
             return
+        self.send_err(404, "接口不存在")
+
+    def handle_v1_agents_post(self, path):
+        """/api/v1/agents/* 写路由：adapter 注册与 session 启停。"""
+        runner = get_agent_runner(self.server.cfg)
+        if runner is None:
+            self.send_err(503, "运行历史数据库不可用")
+            return
+        if path == "/api/v1/agents/adapters":
+            data, err = self.read_json_body()
+            if err:
+                self.send_err(400, err)
+                return
+            try:
+                adapter = make_adapter(
+                    name=str(data.get("name") or "").strip(),
+                    executable=str(data.get("executable") or "").strip(),
+                    args_template=data.get("argsTemplate"),
+                    env_template=data.get("envTemplate"),
+                    cwd_template=data.get("cwdTemplate"),
+                    stdin_mode=data.get("stdinMode") or "file",
+                )
+            except ValueError as exc:
+                self.send_err(400, str(exc))
+                return
+            runner.add_adapter(adapter)
+            self.send_json(adapter, 201)
+            return
+        if path == "/api/v1/agents/sessions":
+            data, err = self.read_json_body()
+            if err:
+                self.send_err(400, err)
+                return
+            adapter_id = str(data.get("adapterId") or "").strip()
+            project_id = str(data.get("projectId") or "").strip()
+            if not adapter_id or not project_id:
+                self.send_err(400, "adapterId 与 projectId 必填")
+                return
+            prompt_file = data.get("promptFile")
+            if prompt_file is not None and (
+                    not isinstance(prompt_file, str) or not prompt_file.strip()):
+                self.send_err(400, "promptFile 必须是路径字符串")
+                return
+            session, error = runner.start(
+                adapter_id, project_id,
+                prompt=data.get("prompt"),
+                prompt_file=prompt_file,
+                workflow_run_id=data.get("workflowRunId"),
+                workflow_step_id=data.get("workflowStepId"))
+            if error:
+                self.send_json({"ok": False, "error": error}, 400)
+                return
+            self.send_json(_public_session(session), 201)
+            return
+        if path.startswith("/api/v1/agents/sessions/"):
+            session_id = path[len("/api/v1/agents/sessions/"):]
+            if session_id.endswith("/stop"):
+                self.discard_body()
+                session_id = session_id[:-len("/stop")]
+                ok, error = runner.stop(session_id)
+                if not ok:
+                    self.send_json({"ok": False, "error": error}, 409)
+                    return
+                self.send_json({"ok": True})
+                return
         self.send_err(404, "接口不存在")
 
     def handle_v1_resource_action(self, resource_id, action):
@@ -3022,7 +3169,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.handle_console_stop()
                 return
             if path.startswith("/api/v1/"):
-                self.handle_v1_post(path)
+                if path.startswith("/api/v1/agents/"):
+                    self.handle_v1_agents_post(path)
+                else:
+                    self.handle_v1_post(path)
                 return
             if path == "/api/apps":
                 self.handle_app_create()
@@ -3869,6 +4019,12 @@ def _run_console(preferred_port=None, open_browser=True):
     cfg = Config(CONFIG_PATH)
     ensure_project_domain(cfg)
     reconcile_runs(cfg)
+    runner = get_agent_runner(cfg)
+    if runner is not None:
+        try:
+            runner.reconcile()
+        except Exception:
+            LOG.exception("agent 会话对账失败")
     start_run_guard(cfg)
 
     server, port = None, None

@@ -11,7 +11,7 @@ import sqlite3
 import threading
 import time
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -40,7 +40,34 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE INDEX IF NOT EXISTS idx_runs_app ON runs(app_id);
 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
 CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at);
+
+CREATE TABLE IF NOT EXISTS agent_sessions (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    adapter_id TEXT NOT NULL,
+    workflow_run_id TEXT,
+    workflow_step_id TEXT,
+    status TEXT NOT NULL,
+    pid INTEGER,
+    run_token TEXT,
+    started_at INTEGER,
+    ended_at INTEGER,
+    exit_code INTEGER,
+    log_path TEXT,
+    prompt_ref TEXT,
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_project ON agent_sessions(project_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_status ON agent_sessions(status);
+CREATE INDEX IF NOT EXISTS idx_sessions_started ON agent_sessions(started_at);
 """
+
+_SESSION_FIELDS = (
+    "id", "project_id", "adapter_id", "workflow_run_id", "workflow_step_id",
+    "status", "pid", "run_token", "started_at", "ended_at", "exit_code",
+    "log_path", "prompt_ref", "created_at",
+)
 
 _RUN_FIELDS = (
     "id", "app_id", "project_id", "kind", "status", "pid",
@@ -50,6 +77,10 @@ _RUN_FIELDS = (
 
 
 def _row_to_run(row):
+    return dict(row) if row is not None else None
+
+
+def _row_to_session(row):
     return dict(row) if row is not None else None
 
 
@@ -155,6 +186,66 @@ class RunDatabase:
                 "ORDER BY started_at DESC LIMIT 1" % ", ".join(_RUN_FIELDS),
                 (app_id,)).fetchone()
         return _row_to_run(row)
+
+    # ------------------------------------------------------------ sessions
+
+    def insert_session(self, session):
+        values = [session.get(field) for field in _SESSION_FIELDS]
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO agent_sessions (%s) VALUES (%s)"
+                % (", ".join(_SESSION_FIELDS),
+                   ", ".join("?" for _ in _SESSION_FIELDS)),
+                values)
+            self._conn.commit()
+
+    def update_session(self, session_id, fields):
+        if not fields:
+            return
+        allowed = {field for field in _SESSION_FIELDS if field != "id"}
+        assignments = []
+        values = []
+        for key, value in fields.items():
+            if key in allowed:
+                assignments.append("%s = ?" % key)
+                values.append(value)
+        if not assignments:
+            return
+        values.append(session_id)
+        with self._lock:
+            self._conn.execute(
+                "UPDATE agent_sessions SET %s WHERE id = ?"
+                % ", ".join(assignments), values)
+            self._conn.commit()
+
+    def get_session(self, session_id):
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT %s FROM agent_sessions WHERE id = ?"
+                % ", ".join(_SESSION_FIELDS), (session_id,)).fetchone()
+        return _row_to_session(row)
+
+    def list_sessions(self, limit=50, *, status=None, project_id=None):
+        clauses = []
+        values = []
+        if status is not None:
+            clauses.append("status = ?")
+            values.append(status)
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            values.append(project_id)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        limit = max(1, min(int(limit), 500))
+        query = (
+            "SELECT %s FROM agent_sessions %s ORDER BY created_at DESC LIMIT ?"
+            % (", ".join(_SESSION_FIELDS), where))
+        values.append(limit)
+        with self._lock:
+            rows = self._conn.execute(query, values).fetchall()
+        return [_row_to_session(row) for row in rows]
+
+    def running_sessions(self):
+        return self.list_sessions(status="running", limit=500)
 
 
 def run_origin_label(app):

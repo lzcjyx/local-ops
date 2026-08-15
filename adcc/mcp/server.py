@@ -293,6 +293,12 @@ def t_get_port_owner(server, args):
     return _plain({"port": port, "listeners": owners, "found": bool(owners)})
 
 
+def t_list_agent_sessions(server, args):
+    limit = _runs_limit(args.get("limit", 50))
+    path = "/api/v1/agents/sessions?limit=%d" % limit
+    return _plain(_get(server._daemon(), path))
+
+
 def t_run_task(server, args):
     """启动批处理任务（等价 start_resource，语义更明确）。"""
     resource_id = _require_text(args, "id")
@@ -327,6 +333,9 @@ TOOLS = [
           t_get_run_logs),
     _tool("get_port_owner", "查询端口当前监听者",
           {"port": {"type": "integer"}}, t_get_port_owner),
+    _tool("list_agent_sessions", "列出 agent 会话（只读）",
+          {"limit": {"type": "integer", "description": "1-100"}},
+          t_list_agent_sessions),
 ]
 
 TOOL_BY_NAME = {tool["name"]: tool for tool in TOOLS}
