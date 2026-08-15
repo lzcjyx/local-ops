@@ -43,12 +43,19 @@ from adcc.core.constants import (
     TASK_CANCELED_EXIT_CODE,
 )
 from adcc.core.errors import ConfigSchemaError, FutureConfigSchemaError
+from adcc.core.events import EventBus
 from adcc.platform import get_platform_adapter
 from adcc.projects import (
     assign_resources_from_apps,
     project_summary,
 )
 from adcc.projects.detection import detect_mcp_servers, git_root
+from adcc.runtime.runs import (
+    finalize_run_status,
+    make_run,
+    public_run,
+)
+from adcc.storage.database import RunDatabase, run_origin_label
 from adcc.runtime.lifecycle import (
     legacy_candidate_pids as core_legacy_candidate_pids,
     legacy_identity_applicable as core_legacy_identity_applicable,
@@ -163,6 +170,26 @@ SIGKILL = getattr(signal, "SIGKILL", 9)  # Windows 的 signal 模块无 SIGKILL
 ICON_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".ico")
 LOG = logging.getLogger("console")
 LOG_LOCK = threading.RLock()
+
+# ---------------------------------------------------------------- M4 运行历史
+RUNS_DB_PATH = os.path.join(DATA_DIR, "console.sqlite3")
+EVENTS = EventBus()
+RUNS_DB = None
+_runs_db_lock = threading.Lock()
+
+
+def get_runs_db():
+    """惰性打开运行历史数据库；失败降级为 None（API 返回空，不阻塞运行）。"""
+    global RUNS_DB
+    if RUNS_DB is None:
+        with _runs_db_lock:
+            if RUNS_DB is None:
+                try:
+                    RUNS_DB = RunDatabase(RUNS_DB_PATH)
+                except Exception:
+                    LOG.exception("打开运行历史数据库失败")
+                    RUNS_DB = False
+    return RUNS_DB or None
 MANUAL_STOP_LOCK = threading.RLock()
 MANUAL_STOP_TOKENS = set()
 
@@ -577,7 +604,8 @@ def _managed_process_index_windows(apps, groups=None):
         snap,
         origin,
         current_user=SELF_UID,
-        run_token_env_marker=RUN_TOKEN_ENV + "=",
+        # Windows 批处理文件名 console-run-<token>.cmd（冒号非法字符）
+        run_token_marker="console-run-",
     )
     return result, snap, {}
 
@@ -781,6 +809,39 @@ def build_project_summaries(cfg, app_rows):
         project_summary(project, resources, running_resource_ids)
         for project in projects
     ]
+
+
+def _v1_projects(snapshot):
+    """/api/v1/projects：项目 + 其资源（含 app_id 桥）。"""
+    projects = snapshot.get("projects") or []
+    resources = snapshot.get("resources") or []
+    result = []
+    for project in projects:
+        item = {
+            key: project.get(key)
+            for key in ("id", "name", "root_path", "repo_path",
+                        "workspace_id", "environment", "tags")
+        }
+        item["resources"] = [
+            dict(resource) for resource in resources
+            if resource.get("project_id") == project.get("id")]
+        result.append(item)
+    return result
+
+
+def _v1_resources(snapshot):
+    return [dict(resource) for resource in snapshot.get("resources") or []]
+
+
+def _v1_runs(query):
+    db = get_runs_db()
+    if not db:
+        return {"runs": [], "total": 0}
+    runs = db.list_runs(
+        query.get("limit", 50),
+        app_id=query.get("app_id"),
+        status=query.get("status"))
+    return {"runs": [public_run(run) for run in runs], "total": len(runs)}
 
 
 def build_state(cfg, console_port, config_health=None):
@@ -1031,6 +1092,106 @@ def startup_failure_message(app_id, code):
     return "启动命令立即退出（exit %s），请查看日志" % code
 
 
+def project_id_for_app(cfg_snapshot, app_id):
+    """resource(app_id 桥) → project_id；无桥时为 None（M3 兼容）。"""
+    for resource in cfg_snapshot.get("resources") or []:
+        if resource.get("app_id") == app_id:
+            return resource.get("project_id")
+    return None
+
+
+def record_run_start(cfg, app_id, proc, pgid, token):
+    """受控启动成功后创建 durable run 记录（M4 §14）。"""
+    db = get_runs_db()
+    if not db:
+        return None
+    snapshot = cfg.snapshot()
+    app = find_app(snapshot, app_id)
+    if app is None:
+        return None
+    kind = app.get("kind") or "service"
+    if kind not in ("service", "task"):
+        kind = "service"
+    run = make_run(
+        app_id=app_id,
+        project_id=project_id_for_app(snapshot, app_id),
+        kind=kind,
+        pid=proc.pid,
+        process_group_id=pgid,
+        run_token=token,
+        log_path=os.path.join(LOGS_DIR, "%s.log" % app_id),
+    )
+    try:
+        db.insert_run(run)
+        EVENTS.publish("run.created", public_run(run))
+    except Exception:
+        LOG.exception("写入运行历史失败")
+        return None
+    return run
+
+
+def finalize_runs_for_app(app_id, code, manual_stop, ended_at):
+    """把最新 running run 归一到终态（幂等：只转换 running）。"""
+    db = get_runs_db()
+    if not db:
+        return
+    run = db.latest_run_for_app(app_id)
+    if not run or run.get("status") != "running":
+        return
+    status = finalize_run_status(run, code, manual_stop=manual_stop)
+    try:
+        db.update_run(run["id"], {
+            "status": status,
+            "ended_at": int(ended_at),
+            "exit_code": code if code is not None else None,
+        })
+        EVENTS.publish("run.updated", public_run(db.get_run(run["id"])))
+    except Exception:
+        LOG.exception("更新运行历史失败")
+
+
+def reconcile_runs(cfg):
+    """daemon 重启对账：running 记录按当前受管身份重验，消失的标记 lost。
+
+    绝不把 vanished 的工作标记为成功（SPEC §12.3）。"""
+    db = get_runs_db()
+    if not db:
+        return
+    snapshot = cfg.snapshot()
+    for run in db.running_runs():
+        alive = False
+        app = find_app(snapshot, run.get("app_id")) if run.get("app_id") else None
+        if app is not None:
+            try:
+                alive = bool(app_running(app))
+            except Exception:
+                alive = False
+        if not alive:
+            try:
+                db.update_run(run["id"], {
+                    "status": "lost",
+                    "ended_at": int(time.time()),
+                })
+                EVENTS.publish("run.updated", public_run(db.get_run(run["id"])))
+            except Exception:
+                LOG.exception("运行对账失败")
+
+
+def start_run_guard(cfg):
+    """低频率监护：对账后仍 running 的 run（重启前启动、无 watch 线程的
+    独立进程）在进程消失时标记 lost，不误报成功。"""
+    def _guard():
+        while True:
+            time.sleep(15)
+            try:
+                reconcile_runs(cfg)
+            except Exception:
+                LOG.exception("运行监护失败")
+    thread = threading.Thread(target=_guard, daemon=True)
+    thread.start()
+    return thread
+
+
 def watch_app_exit(cfg, app_id, proc, token, started_at=None):
     """后台线程等子进程退出：若期间未被手动 stop/重启（lastPid 仍指向它），
     记录 lastExit（退出码、结束时间和运行耗时）。保留 lastPid 作为进程组锚点——
@@ -1060,6 +1221,13 @@ def watch_app_exit(cfg, app_id, proc, token, started_at=None):
                     last_exit["status"] = classify_task_exit(code)
                 target["lastExit"] = last_exit
         cfg.update(op)
+        finalize_runs_for_app(app_id, code, manually_stopped, ended_at)
+        if IS_WINDOWS:
+            try:
+                os.remove(os.path.join(
+                    tempfile.gettempdir(), "console-run-%s.cmd" % token))
+            except OSError:
+                pass
         rotate_log_file(os.path.join(LOGS_DIR, "%s.log" % app_id))
     thread = threading.Thread(target=_wait, daemon=True)
     thread.start()
@@ -1084,6 +1252,7 @@ def persist_started_app(cfg, app_id, proc, pgid, token):
         return False
     saved = cfg.update(op)
     if saved:
+        record_run_start(cfg, app_id, proc, pgid, token)
         watch_app_exit(cfg, app_id, proc, token, started_at)
     return saved
 
@@ -1726,6 +1895,8 @@ def stop_app_and_clear(cfg, app, timeout=APP_STOP_TIMEOUT_SEC, listeners=None):
         ok, error = stop_app_and_wait(app, timeout, listeners)
         if not ok:
             return False, error
+        # M4：手动停止归一到 stopped（watch 线程可能已先归一并幂等跳过）
+        finalize_runs_for_app(app["id"], None, True, time.time())
         last_exit = None
         if (app.get("kind") or "service") == "task":
             # 覆盖可能保留的旧成功记录，避免“刚刚手动停止”仍显示上次成功。
@@ -2476,6 +2647,12 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/console/log":
                 self.handle_console_log(parsed.query)
                 return
+            if path == "/api/v1/events":
+                self.handle_v1_events()
+                return
+            if path.startswith("/api/v1/"):
+                self.handle_v1_get(path, parsed.query)
+                return
             m = APP_ROUTE_RE.match(path)
             if m and m.group(2) == "logs":
                 self.handle_logs(m.group(1), parsed.query)
@@ -2545,6 +2722,220 @@ class Handler(BaseHTTPRequestHandler):
         tail = self._parse_log_tail(query)
         self.send_json({"text": read_log_tail(app_id, tail)})
 
+    # ------------------------------------------------------ M4 /api/v1
+
+    V1_ROUTE_RE = re.compile(
+        r"^/api/v1/(projects|resources|runs)"
+        r"(?:/([0-9a-fA-F]{8}|[0-9a-zA-Z_-]+))?"
+        r"(?:/(start|stop|restart|logs))?$")
+
+    def handle_v1_get(self, path, query):
+        """/api/v1 GET 路由：health/state/projects/resources/runs/logs。"""
+        if path == "/api/v1/health":
+            health = build_health(self.server.cfg)
+            self.send_json({
+                "status": health.get("status"),
+                "version": APP_VERSION,
+                "schemaVersion": CURRENT_SCHEMA_VERSION,
+                "degraded": health.get("degraded"),
+                "issues": health.get("issues"),
+                "config": health.get("config"),
+            })
+            return
+        if path == "/api/v1/state":
+            state = get_state_snapshot(self.server.cfg,
+                                       self.server.console_port)
+            self.send_json({
+                "services": state.get("services"),
+                "apps": state.get("apps"),
+                "projects": state.get("projects"),
+                "watched": state.get("watched"),
+                "consolePort": state.get("consolePort"),
+                "version": state.get("version"),
+                "schemaVersion": state.get("schemaVersion"),
+            })
+            return
+        if path == "/api/v1/projects":
+            snapshot = self.server.cfg.snapshot()
+            self.send_json(_v1_projects(snapshot))
+            return
+        if path == "/api/v1/resources":
+            snapshot = self.server.cfg.snapshot()
+            self.send_json(_v1_resources(snapshot))
+            return
+        if path == "/api/v1/runs":
+            self.send_json(_v1_runs(self._v1_run_query(query)))
+            return
+        match = self.V1_ROUTE_RE.match(path)
+        if not match:
+            self.send_err(404, "接口不存在")
+            return
+        collection, identifier, action = match.groups()
+        if collection == "projects" and identifier and not action:
+            project = self._v1_find_project(identifier)
+            if project is None:
+                self.send_err(404, "项目不存在")
+                return
+            self.send_json(project)
+            return
+        if collection == "resources" and identifier and not action:
+            resource = self._v1_find_resource(identifier)
+            if resource is None:
+                self.send_err(404, "资源不存在")
+                return
+            self.send_json(resource)
+            return
+        if collection == "runs" and identifier:
+            db = get_runs_db()
+            run = db.get_run(identifier) if db else None
+            if run is None:
+                self.send_err(404, "运行记录不存在")
+                return
+            if action == "logs":
+                tail = self._parse_log_tail(query)
+                self.send_json({
+                    "runId": identifier,
+                    "text": read_log_tail(run.get("app_id"), tail)
+                    if run.get("app_id") else "",
+                })
+                return
+            self.send_json(public_run(run))
+            return
+        self.send_err(404, "接口不存在")
+
+    def _v1_run_query(self, query):
+        params = urllib.parse.parse_qs(query)
+        result = {"limit": 50}
+        if params.get("limit"):
+            try:
+                result["limit"] = max(1, min(int(params["limit"][0]), 500))
+            except (TypeError, ValueError):
+                pass
+        if params.get("appId"):
+            result["app_id"] = params["appId"][0]
+        if params.get("status"):
+            result["status"] = params["status"][0]
+        return result
+
+    def _v1_find_project(self, identifier):
+        snapshot = self.server.cfg.snapshot()
+        for project in _v1_projects(snapshot):
+            if project["id"] == identifier:
+                return project
+        return None
+
+    def _v1_find_resource(self, identifier):
+        snapshot = self.server.cfg.snapshot()
+        for resource in _v1_resources(snapshot):
+            if resource["id"] == identifier:
+                return resource
+        return None
+
+    def handle_v1_post(self, path):
+        """/api/v1 写路由：项目/资源 CRUD 与资源启停（经 app_id 桥）。"""
+        if path == "/api/v1/projects":
+            data, err = self.read_json_body()
+            if err:
+                self.send_err(400, err)
+                return
+            name = str(data.get("name") or "").strip()
+            root = str(data.get("rootPath") or "").strip()
+            if not name or not root:
+                self.send_err(400, "name 与 rootPath 必填")
+                return
+            try:
+                def op(c):
+                    from adcc.projects import create_project
+                    return create_project(
+                        c, name, root,
+                        repo_path=data.get("repoPath") or None,
+                        tags=data.get("tags") or None,
+                        environment=data.get("environment") or None)
+                project = self.server.cfg.update(op)
+            except ValueError as e:
+                self.send_err(400, str(e))
+                return
+            EVENTS.publish("project.updated",
+                           {"id": project.get("id")})
+            self.send_json(project, 201)
+            return
+        match = self.V1_ROUTE_RE.match(path)
+        if not match:
+            self.send_err(404, "接口不存在")
+            return
+        collection, identifier, action = match.groups()
+        if collection == "resources" and identifier and action in (
+                "start", "stop", "restart"):
+            self.handle_v1_resource_action(identifier, action)
+            return
+        self.send_err(404, "接口不存在")
+
+    def handle_v1_resource_action(self, resource_id, action):
+        """资源启停：经 app_id 桥委托 legacy app 操作（锁由装饰器承担）。"""
+        snapshot = self.server.cfg.snapshot()
+        resource = next(
+            (r for r in snapshot.get("resources") or []
+             if r.get("id") == resource_id), None)
+        if resource is None:
+            self.send_err(404, "资源不存在")
+            return
+        app_id = resource.get("app_id")
+        if not app_id:
+            self.send_err(409, "该资源尚未关联受管应用（等待 M4 完整接管）")
+            return
+        if action == "start":
+            self.handle_app_start(app_id)
+        elif action == "stop":
+            self.handle_app_stop(app_id)
+        else:
+            self.handle_app_restart(app_id)
+
+    def handle_v1_events(self):
+        """SSE 事件流：text/event-stream，断线自动清理订阅。"""
+        subscription = EVENTS.subscribe()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        try:
+            deadline = time.monotonic() + 15
+            while True:
+                try:
+                    event = subscription.get(timeout=1)
+                except Exception:
+                    event = None
+                if event is not None:
+                    try:
+                        payload = json.dumps(
+                            event, ensure_ascii=False)
+                        self.wfile.write(
+                            ("data: %s\n\n" % payload).encode("utf-8"))
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        break
+                    deadline = time.monotonic() + 15
+                    continue
+                if time.monotonic() >= deadline:
+                    try:
+                        self.wfile.write(b": ping\n\n")
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        break
+                    deadline = time.monotonic() + 15
+        finally:
+            EVENTS.unsubscribe(subscription)
+
+    def handle_v1_console_log(self, query):
+        self.handle_console_log(query)
+
+    def handle_logs(self, app_id, query):
+        _, app = self._get_app_or_404(app_id)
+        if app is None:
+            return
+        tail = self._parse_log_tail(query)
+        self.send_json({"text": read_log_tail(app_id, tail)})
+
     def handle_console_log(self, query):
         """总控台自身日志（data/logs/console.log），与维护线程共用轮转。"""
         tail = self._parse_log_tail(query)
@@ -2594,6 +2985,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/console/stop":
                 self.discard_body()
                 self.handle_console_stop()
+                return
+            if path.startswith("/api/v1/"):
+                self.handle_v1_post(path)
                 return
             if path == "/api/apps":
                 self.handle_app_create()
@@ -3430,6 +3824,8 @@ def _run_console(preferred_port=None, open_browser=True):
     start_log_maintenance()
     cfg = Config(CONFIG_PATH)
     ensure_project_domain(cfg)
+    reconcile_runs(cfg)
+    start_run_guard(cfg)
 
     server, port = None, None
     candidates = list(range(PORT_START, PORT_START + PORT_TRIES))

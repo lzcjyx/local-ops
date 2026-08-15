@@ -91,21 +91,24 @@ def managed_process_index_windows(
         origin_table: Mapping[int, tuple[int, str]],
         *,
         current_user: Any,
-        run_token_env_marker: str,
+        run_token_marker: str,
 ) -> dict[Any, list[int]]:
     """Windows managed identity from collected PID/ancestry facts.
 
     Windows has no POSIX process groups and no portable way to read
     another process's environment.  The adapter starts every managed app
-    through a ``cmd.exe`` wrapper whose command line carries
-    ``CONSOLE_RUN_TOKEN=<token>`` (``run_token_env_marker``); identity is
-    therefore: recorded ``lastPid`` alive, owned by the current user, and
-    carrying the matching marker in its command line.  Once the wrapper is
-    verified, its descendant tree (built from ``origin_table``) is treated
-    as managed, mirroring the macOS group-member rule.
+    through a ``cmd.exe /c`` batch file named ``console-run-<token>.cmd``,
+    so the marker prefix (``run_token_marker``, typically
+    ``RUN_TOKEN_ARG_PREFIX``) appears in the batch's CommandLine.  Identity
+    is therefore: recorded ``lastPid`` alive, owned by the current user,
+    and carrying the matching marker in its command line.  Once the
+    controller is verified, its descendant tree (built from
+    ``origin_table``) is treated as managed, mirroring the macOS
+    group-member rule.
     """
     app_list = list(apps)
-    descendants: dict[int, list[int]] = {}
+    descendants: dict[Any, list[int]] = {
+        app.get("id"): [] for app in app_list}
     for app in app_list:
         token = app.get("runToken")
         controller = app.get("lastPid")
@@ -117,7 +120,7 @@ def managed_process_index_windows(
             continue
         if entry.get("uid") != current_user:
             continue
-        marker = run_token_env_marker + token
+        marker = run_token_marker + token
         if marker not in entry.get("args", ""):
             continue
         children: dict[int, list[int]] = {}

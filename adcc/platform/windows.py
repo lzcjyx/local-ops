@@ -286,10 +286,31 @@ class WindowsPlatformAdapter(PlatformAdapter):
     # ------------------------------------------------------------ control
 
     def start_process(self, cwd, env, log_fd, command, marker):
+        """Start via a temporary batch file carrying the run marker.
+
+        A direct ``cmd /c "<set ...> && <command>"`` wrapper breaks when
+        the user command itself contains quotes (subprocess re-quotes argv
+        containing spaces, nesting quotes under ``/c``).  Writing the
+        command into a batch file named ``console-run-<token>.cmd`` keeps
+        the marker visible in CommandLine (identity check) while the
+        command text executes verbatim.  The batch file lives in the OS
+        temp dir; the server deletes it once the process exits.
+        """
+        import tempfile
         creationflags = 0x00000200 | 0x08000000  # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
-        wrapper = 'set "%s=%s" && %s' % (RUN_TOKEN_ENV, marker, command)
+        batch = os.path.join(
+            tempfile.gettempdir(), "console-run-%s.cmd" % marker)
+        try:
+            with open(batch, "w", encoding="utf-8-sig") as handle:
+                handle.write(
+                    "@echo off\r\n"
+                    "set %s=%s\r\n"
+                    "%s\r\n"
+                    "exit /b %%errorlevel%%\r\n" % (RUN_TOKEN_ENV, marker, command))
+        except OSError:
+            return None, None
         proc = subprocess.Popen(
-            ["cmd.exe", "/d", "/s", "/c", wrapper],
+            ["cmd.exe", "/d", "/s", "/c", batch],
             cwd=cwd, stdout=log_fd, stderr=subprocess.STDOUT,
             env=env, creationflags=creationflags, close_fds=True)
         return proc, None

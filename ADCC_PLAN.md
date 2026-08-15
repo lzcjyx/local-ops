@@ -192,17 +192,17 @@ On Windows and macOS:
 
 ## Tasks
 
-- [ ] Implement `ManagedRun` model and status enum.
-- [ ] Add SQLite operational database and schema migrations.
-- [ ] Persist service/task run start/end transitions.
-- [ ] Index logs by run ID.
-- [ ] Implement bounded/tail log reads.
-- [ ] Add `/api/v1/health` and `/api/v1/state`.
-- [ ] Add `/api/v1/projects`, `/resources`, `/runs` APIs.
-- [ ] Keep compatibility `/api/...` routes while frontend migration is incomplete.
-- [ ] Add SSE `/api/v1/events` or an equivalent dependency-light event stream.
-- [ ] Add contract tests for all v1 models/status enums.
-- [ ] Add daemon restart reconciliation tests.
+- [x] Implement `ManagedRun` model and status enum.
+- [x] Add SQLite operational database and schema migrations.
+- [x] Persist service/task run start/end transitions.
+- [x] Index logs by run ID.
+- [x] Implement bounded/tail log reads.
+- [x] Add `/api/v1/health` and `/api/v1/state`.
+- [x] Add `/api/v1/projects`, `/resources`, `/runs` APIs.
+- [x] Keep compatibility `/api/...` routes while frontend migration is incomplete.
+- [x] Add SSE `/api/v1/events` or an equivalent dependency-light event stream.
+- [x] Add contract tests for all v1 models/status enums.
+- [x] Add daemon restart reconciliation tests.
 
 ## Exit gate
 
@@ -561,6 +561,7 @@ Coding agents should update only the status field/check boxes, not rewrite compl
 | M1 | COMPLETE | passed | `adcc/` 包提取 config/ports/processes/lifecycle/tasks 策略，`server.py` 减 611 行改为兼容入口委托（ADR-0001）；25 项新单测 + 58 项可移植测试在 Windows 本地通过，macOS 专属回归（fcntl/ps/lsof、159 全量 CI）待 macOS CI 运行确认；发行 allowlist/语法检查/发行测试已覆盖 `adcc/`。 |
 | M2 | COMPLETE | passed | PlatformAdapter（macos/windows/unsupported，ADR-0002）；Windows 本地启停/端口/身份/外部进程安全实测通过；CI 矩阵落地（macOS 审计 + Windows 可移植 202 测试）双平台全绿，M1/M2 macOS parity 一并确认（check + release 构建 + 可重复性验证通过）。 |
 | M3 | COMPLETE | passed | 项目域落地（ADR-0003）：schema v2 + workspace/project/resource 模型与 registry、legacy apps 惰性幂等迁移（Unassigned 桶 + app_id 桥）、git root/MCP 检测、state 项目摘要 + 前端项目过滤；165 项测试 + 20 项新项目域测试通过，Windows CI 全绿。 |
+| M4 | COMPLETE | passed | ManagedRun + SQLite 历史 + /api/v1 + SSE（ADR-0004）：run 启停/退出/重启对账（lost 不伪造成功）、/api/v1 health/state/projects/resources/runs/logs、SSE 事件流；修复 Windows cmd 引号坑（临时批处理 + 文件名 token 身份）；189 项测试通过，Windows CI 全绿。 |
 | M2 | NOT STARTED | pending | |
 | M3 | NOT STARTED | pending | |
 | M4 | NOT STARTED | pending | |

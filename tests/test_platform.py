@@ -126,6 +126,46 @@ class WindowsCimParsingTests(unittest.TestCase):
         self.assertEqual(list(snap), [100])
 
 
+class WindowsManagedIdentityTests(unittest.TestCase):
+    """managed_process_index_windows pure policy (M2/M4 identity)."""
+
+    def test_controller_with_marker_and_tree_is_managed(self):
+        from adcc.runtime.lifecycle import managed_process_index_windows
+        apps = [{
+            "id": "aaaaaaaa", "runToken": "tok123",
+            "lastPid": 100, "name": "x", "command": "cmd",
+        }]
+        snap = {100: {"uid": "alice", "args": "cmd.exe /d /s /c console-run-tok123.cmd"}}
+        origin = {100: (1, "cmd"), 200: (100, "python app.py"),
+                  300: (200, "node child.js"), 400: (1, "other")}
+        result = managed_process_index_windows(
+            apps, snap, origin, current_user="alice",
+            run_token_marker="console-run-")
+        self.assertEqual(result["aaaaaaaa"], [100, 200, 300])
+
+    def test_wrong_user_is_excluded(self):
+        from adcc.runtime.lifecycle import managed_process_index_windows
+        apps = [{
+            "id": "aaaaaaaa", "runToken": "tok123",
+            "lastPid": 100, "name": "x", "command": "cmd",
+        }]
+        snap = {100: {"uid": "bob", "args": "cmd console-run-tok123.cmd"}}
+        result = managed_process_index_windows(
+            apps, snap, {}, current_user="alice", run_token_marker="console-run-")
+        self.assertEqual(result["aaaaaaaa"], [])
+
+    def test_missing_marker_is_excluded(self):
+        from adcc.runtime.lifecycle import managed_process_index_windows
+        apps = [{
+            "id": "aaaaaaaa", "runToken": "tok123",
+            "lastPid": 100, "name": "x", "command": "cmd",
+        }]
+        snap = {100: {"uid": "alice", "args": "cmd.exe unrelated"}}
+        result = managed_process_index_windows(
+            apps, snap, {}, current_user="alice", run_token_marker="console-run-")
+        self.assertEqual(result["aaaaaaaa"], [])
+
+
 @unittest.skipUnless(IS_WINDOWS, "Windows runtime smoke")
 class WindowsRuntimeTests(unittest.TestCase):
     @classmethod

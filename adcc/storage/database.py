@@ -1,0 +1,168 @@
+"""SQLite operational database (M4): runs history and event metadata.
+
+Standard-library ``sqlite3`` only.  Log *content* stays in files; this
+database indexes runs and stores run metadata (SPEC §13.2).  The single
+connection is guarded by a lock so any thread may use it.
+"""
+
+import json
+import os
+import sqlite3
+import threading
+import time
+
+SCHEMA_VERSION = 1
+
+_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    applied_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS runs (
+    id TEXT PRIMARY KEY,
+    app_id TEXT,
+    project_id TEXT,
+    kind TEXT NOT NULL,
+    status TEXT NOT NULL,
+    pid INTEGER,
+    process_group_id INTEGER,
+    run_token TEXT,
+    started_at INTEGER NOT NULL,
+    ended_at INTEGER,
+    exit_code INTEGER,
+    log_path TEXT,
+    origin TEXT,
+    correlation_id TEXT,
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_runs_app ON runs(app_id);
+CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
+CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at);
+"""
+
+_RUN_FIELDS = (
+    "id", "app_id", "project_id", "kind", "status", "pid",
+    "process_group_id", "run_token", "started_at", "ended_at",
+    "exit_code", "log_path", "origin", "correlation_id", "created_at",
+)
+
+
+def _row_to_run(row):
+    return dict(row) if row is not None else None
+
+
+class RunDatabase:
+    """Operational run history in one SQLite file."""
+
+    def __init__(self, path):
+        directory = os.path.dirname(path) or "."
+        os.makedirs(directory, exist_ok=True)
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        with self._lock:
+            self._migrate()
+
+    def _migrate(self):
+        cursor = self._conn.cursor()
+        cursor.executescript(_SCHEMA_SQL)
+        try:
+            version = cursor.execute(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_migrations"
+            ).fetchone()[0]
+        except sqlite3.OperationalError:
+            version = 0
+        if version < SCHEMA_VERSION:
+            cursor.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                (SCHEMA_VERSION, int(time.time())))
+        self._conn.commit()
+
+    def close(self):
+        with self._lock:
+            self._conn.close()
+
+    # ------------------------------------------------------------ runs
+
+    def insert_run(self, run):
+        values = [run.get(field) for field in _RUN_FIELDS]
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO runs (%s) VALUES (%s)"
+                % (", ".join(_RUN_FIELDS),
+                   ", ".join("?" for _ in _RUN_FIELDS)),
+                values)
+            self._conn.commit()
+
+    def update_run(self, run_id, fields):
+        if not fields:
+            return
+        allowed = {field for field in _RUN_FIELDS if field != "id"}
+        assignments = []
+        values = []
+        for key, value in fields.items():
+            if key in allowed:
+                assignments.append("%s = ?" % key)
+                values.append(value)
+        if not assignments:
+            return
+        values.append(run_id)
+        with self._lock:
+            self._conn.execute(
+                "UPDATE runs SET %s WHERE id = ?" % ", ".join(assignments),
+                values)
+            self._conn.commit()
+
+    def get_run(self, run_id):
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT %s FROM runs WHERE id = ?" % ", ".join(_RUN_FIELDS),
+                (run_id,)).fetchone()
+        return _row_to_run(row)
+
+    def list_runs(self, limit=50, *, app_id=None, status=None, before=None):
+        clauses = []
+        values = []
+        if app_id is not None:
+            clauses.append("app_id = ?")
+            values.append(app_id)
+        if status is not None:
+            clauses.append("status = ?")
+            values.append(status)
+        if before is not None:
+            clauses.append("started_at < ?")
+            values.append(before)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        limit = max(1, min(int(limit), 500))
+        query = (
+            "SELECT %s FROM runs %s ORDER BY started_at DESC LIMIT ?"
+            % (", ".join(_RUN_FIELDS), where))
+        values.append(limit)
+        with self._lock:
+            rows = self._conn.execute(query, values).fetchall()
+        return [_row_to_run(row) for row in rows]
+
+    def running_runs(self):
+        """Runs recorded as still running (daemon restart reconciliation)."""
+        return self.list_runs(status="running", limit=500)
+
+    def latest_run_for_app(self, app_id):
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT %s FROM runs WHERE app_id = ? "
+                "ORDER BY started_at DESC LIMIT 1" % ", ".join(_RUN_FIELDS),
+                (app_id,)).fetchone()
+        return _row_to_run(row)
+
+
+def run_origin_label(app):
+    """Origin string for a run record; pure mapping, no OS access."""
+    origin = app.get("origin") if isinstance(app.get("origin"), dict) else None
+    if origin:
+        return origin.get("label") or None
+    return None
+
+
+__all__ = ["RunDatabase", "run_origin_label"]
