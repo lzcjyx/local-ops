@@ -215,7 +215,7 @@ class LockManagerTests(unittest.TestCase):
 
 
 def long_path(path):
-    """Expand 8.3 short paths so git/tempfile path forms compare equal."""
+    """Expand 8.3 short paths (Windows) so path forms compare equal."""
     try:
         import ctypes
         buffer = ctypes.create_unicode_buffer(4096)
@@ -223,6 +223,11 @@ def long_path(path):
         return buffer.value or path
     except Exception:
         return path
+
+
+def comparable_path(path):
+    """Normalize symlinks (/tmp -> /private/tmp) and short names."""
+    return long_path(os.path.realpath(os.path.normpath(path)))
 
 
 class GitWorktreeTests(unittest.TestCase):
@@ -264,7 +269,8 @@ class GitWorktreeTests(unittest.TestCase):
         self.assertIsNone(error, error)
         self.assertTrue(os.path.isfile(os.path.join(path, "a.txt")))
         worktrees = list_worktrees(self.repo)
-        self.assertTrue(any(long_path(wt.get("path")) == long_path(path)
+        self.assertTrue(any(comparable_path(wt.get("path"))
+                            == comparable_path(path)
                             for wt in worktrees))
         ok, error = remove_worktree(self.repo, path, branch)
         self.assertTrue(ok, error)
