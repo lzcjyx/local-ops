@@ -395,42 +395,42 @@ On Windows and macOS:
 
 ### Navigation
 
-- [ ] Overview
-- [ ] Projects
-- [ ] Agents
-- [ ] Services & MCP
-- [ ] Tasks & Runs
-- [ ] Workflows
-- [ ] Logs
-- [ ] Settings
+- [x] Overview
+- [x] Projects
+- [x] Agents
+- [x] Services & MCP
+- [x] Tasks & Runs
+- [x] Workflows
+- [x] Logs
+- [x] Settings
 
 ### Overview
 
-- [ ] active projects;
-- [ ] active agents;
-- [ ] active services;
-- [ ] failed tasks/workflows;
-- [ ] port conflicts;
-- [ ] daemon health.
+- [x] active projects;
+- [x] active agents;
+- [x] active services;
+- [x] failed tasks/workflows;
+- [x] port conflicts;
+- [x] daemon health.
 
 ### Project detail
 
-- [ ] Git/worktree status;
-- [ ] service/MCP status;
-- [ ] agent sessions;
-- [ ] runs/logs;
-- [ ] workflows;
-- [ ] quick actions.
+- [x] Git/worktree status;
+- [x] service/MCP status;
+- [x] agent sessions;
+- [x] runs/logs;
+- [x] workflows;
+- [x] quick actions.
 
 ### Workflow view
 
 P0 may use a structured list/graph-like layout rather than building a full visual editor.
 
-- [ ] show dependencies;
-- [ ] current step states;
-- [ ] queued reason/locks;
-- [ ] retry/cancel controls;
-- [ ] failure log shortcut.
+- [x] show dependencies;
+- [x] current step states;
+- [x] queued reason/locks;
+- [x] retry/cancel controls;
+- [x] failure log shortcut.
 
 ## Constraint
 
@@ -567,6 +567,7 @@ Coding agents should update only the status field/check boxes, not rewrite compl
 | M7 | COMPLETE | passed | Agent 适配器与会话（ADR-0007）：command 适配器模板渲染、会话生命周期（启停/对账/手动停止竞态修复）、全局+每项目并发排队唤醒、SQLite agent_sessions（migration v2）、API/CLI/MCP 接口、fake agent 集成测试；230 项测试全绿。 |
 | M8 | COMPLETE | passed | Worktrees+锁+Orchestrator（ADR-0008）：ADCC 命名空间 worktree 安全创建/清理、LockManager（持久化恢复）、DAG 校验/拓扑调度/并行上限/service·task·agent·gate 步骤/策略重试/取消传播/重启恢复（lost 不发明成功）、API/CLI/MCP 接口；agent→test→reviewer→gate 集成 fixture 全过，247 项测试全绿。 |
 | M9 | COMPLETE | passed | Tauri 2 桌面壳（ADR-0009）：daemon 发现/启动/健康轮询、webview 承载既有 UI、托盘+关窗隐藏、通知、NSIS 打包（WiX 中文名问题规避）；debug/release 本机运行 smoke 通过（壳退出 daemon 独立存活），CI 双平台编译 smoke 全绿。 |
+| M10 | COMPLETE | passed | 控制中心 GUI（ADR-0010）：rail 6 视图（概览/项目/Agent/工作流新增）+ 表驱动视图切换、views.js 原生渲染（v1 数据 2.5s TTL）、项目资源一键启停、Agent 新建/停止、工作流运行/取消与步骤状态；前端检查与页面加载全绿。 |
 | M2 | NOT STARTED | pending | |
 | M3 | NOT STARTED | pending | |
 | M4 | NOT STARTED | pending | |

@@ -19,6 +19,7 @@ import { buildGlyphGrid, initAppModal, initLogDrawer, openConfirm,
   openConsoleLog } from './js/overlays.js';
 import { configuredPort, actualPorts, portIsOpenable,
   preferredOpenPort } from './js/ports.js';
+import { initViews, renderViews } from './js/views.js';
 
 /* ---------------- DOM 引用 ---------------- */
 const banner = $('#banner');
@@ -37,12 +38,26 @@ const consolePortLabel = $('#consolePortLabel');
 const stopConsoleBtn = $('#stopConsoleBtn');
 const stopConsoleIcon = $('#stopConsoleIcon');
 const stopConsoleLabel = $('#stopConsoleLabel');
-const viewLaunchpad = $('#view-launchpad');
-const viewServices = $('#view-services');
 /* 只有 data-view 的导航轨按钮参与视图切换；data-action 按钮由 widgets 代理 */
 const railBtns = [...document.querySelectorAll('.rail-btn[data-view]')];
 const sideLaunch = $('#sideLaunch');
 const sideSvc = $('#sideSvc');
+
+/* M10：视图元数据表（rail 与顶栏共用；切换完全由表驱动） */
+const VIEWS = {
+  launchpad: { title: '启动台', overline: 'Launchpad',
+    sub: '一键启动与管理你的本地服务和批处理任务', section: $('#view-launchpad') },
+  services: { title: '服务监控', overline: 'Services',
+    sub: '实时掌握本机监听端口与进程负载', section: $('#view-services') },
+  overview: { title: '概览', overline: 'Overview',
+    sub: '项目、服务、Agent 与工作流的运行全景', section: $('#view-overview') },
+  projects: { title: '项目', overline: 'Projects',
+    sub: '按项目管理资源、Agent 会话与工作流', section: $('#view-projects') },
+  agents: { title: 'Agent', overline: 'Agents',
+    sub: '外部编码 Agent 会话的启动、观察与停止', section: $('#view-agents') },
+  workflows: { title: '工作流', overline: 'Workflows',
+    sub: '声明式 DAG 工作流的运行与步骤状态', section: $('#view-workflows') },
+};
 
 let firstRender = true;          // 首屏渲染（stagger 入场）
 
@@ -53,10 +68,12 @@ function switchView(v) {
   localStorage.setItem('console-view', v);
   applyView();
   /* 强制重排以重播视图进入动画 */
-  const active = v === 'launchpad' ? viewLaunchpad : viewServices;
-  active.classList.remove('active');
-  void active.offsetWidth;
-  active.classList.add('active');
+  const meta = VIEWS[v];
+  if (meta) {
+    meta.section.classList.remove('active');
+    void meta.section.offsetWidth;
+    meta.section.classList.add('active');
+  }
 }
 function applyView() {
   const v = state.view;
@@ -74,16 +91,15 @@ function applyView() {
   });
   sideLaunch.hidden = v !== 'launchpad';
   sideSvc.hidden = v !== 'services';
-  viewLaunchpad.classList.toggle('active', v === 'launchpad');
-  viewServices.classList.toggle('active', v === 'services');
-  viewLaunchpad.setAttribute('aria-hidden', String(v !== 'launchpad'));
-  viewServices.setAttribute('aria-hidden', String(v !== 'services'));
-  setText(viewTitle, v === 'launchpad' ? '启动台' : '服务监控');
+  Object.entries(VIEWS).forEach(([key, meta]) => {
+    meta.section.classList.toggle('active', key === v);
+    meta.section.setAttribute('aria-hidden', String(key !== v));
+  });
+  const meta = VIEWS[v];
+  setText(viewTitle, meta ? meta.title : '');
+  setText(viewOverline, meta ? meta.overline : '');
+  setText(viewSub, meta ? meta.sub : '');
   document.documentElement.dataset.view = v;
-  setText(viewOverline, v === 'launchpad' ? 'Launchpad' : 'Services');
-  setText(viewSub, v === 'launchpad'
-    ? '一键启动与管理你的本地服务和批处理任务'
-    : '实时掌握本机监听端口与进程负载');
 }
 navBtns.forEach(b => b.addEventListener('click', () => switchView(b.dataset.view)));
 railBtns.forEach(b => b.addEventListener('click', () => switchView(b.dataset.view)));
@@ -272,6 +288,7 @@ function render() {
   renderLaunchpad(state.data.apps || [], firstRender);
   renderServices(state.data, firstRender);
   renderWidgets(state.data);
+  renderViews(state.data);
   firstRender = false;
 }
 
@@ -610,6 +627,7 @@ initAppModal({ onAddService: $('#addSvcCard'), onAddTask: $('#addTaskCard') });
 initLogDrawer();
 initThemeToggle();
 initWidgets();
+initViews();
 applyTheme();
 applyUiTheme(currentUiTheme());
 applyView();

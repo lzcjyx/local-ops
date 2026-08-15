@@ -35,6 +35,22 @@
         <span class="rail-ic" id="railIconSvc" aria-hidden="true"></span>
         <span class="rail-label">服务监控</span>
       </button>
+      <button class="rail-btn" id="rail-overview" type="button" data-view="overview" aria-label="概览">
+        <span class="rail-ic" id="railIconOverview" aria-hidden="true"></span>
+        <span class="rail-label">概览</span>
+      </button>
+      <button class="rail-btn" id="rail-projects" type="button" data-view="projects" aria-label="项目">
+        <span class="rail-ic" id="railIconProjects" aria-hidden="true"></span>
+        <span class="rail-label">项目</span>
+      </button>
+      <button class="rail-btn" id="rail-agents" type="button" data-view="agents" aria-label="Agent">
+        <span class="rail-ic" id="railIconAgents" aria-hidden="true"></span>
+        <span class="rail-label">Agent</span>
+      </button>
+      <button class="rail-btn" id="rail-workflows" type="button" data-view="workflows" aria-label="工作流">
+        <span class="rail-ic" id="railIconWorkflows" aria-hidden="true"></span>
+        <span class="rail-label">工作流</span>
+      </button>
       <button class="rail-btn" id="rail-logs" type="button" data-action="logs" aria-label="日志中心">
         <span class="rail-ic" id="railIconLogs" aria-hidden="true"></span>
         <span class="rail-label">日志中心</span>
@@ -347,6 +363,35 @@
             </section>
 
           </section>
+
+          <!-- ===== 概览视图 ===== -->
+          <section class="view" id="view-overview" role="tabpanel" aria-hidden="true">
+            <div class="ov-row" id="ovOverviewRow"></div>
+            <div class="panel">
+              <div class="sec-label"><span>需要关注</span></div>
+              <div class="ov-attention" id="ovAttention"></div>
+            </div>
+          </section>
+
+          <!-- ===== 项目视图 ===== -->
+          <section class="view" id="view-projects" role="tabpanel" aria-hidden="true">
+            <div class="projects-grid" id="projectsGrid"></div>
+          </section>
+
+          <!-- ===== Agent 视图 ===== -->
+          <section class="view" id="view-agents" role="tabpanel" aria-hidden="true">
+            <div class="sec-label-row">
+              <div class="sec-label"><span>Agent 会话</span><span class="sec-count" id="agentsCount"></span></div>
+              <button class="btn btn-sm" id="agentsNewBtn" type="button">新建会话</button>
+            </div>
+            <div class="agent-list" id="agentsList"></div>
+          </section>
+
+          <!-- ===== 工作流视图 ===== -->
+          <section class="view" id="view-workflows" role="tabpanel" aria-hidden="true">
+            <div class="wf-grid" id="workflowsGrid"></div>
+          </section>
+
         </div>
 
         <!-- ===== 右侧信息栏 ===== -->
