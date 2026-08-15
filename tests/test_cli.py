@@ -35,6 +35,11 @@ class CliHarness:
         self.logs_dir = os.path.join(self.data_dir, "logs")
         os.makedirs(self.icons_dir)
         os.makedirs(self.logs_dir)
+        for directory in (self.data_dir, self.icons_dir, self.logs_dir):
+            try:
+                os.chmod(directory, 0o700)
+            except OSError:
+                pass
         self._patch_db = mock.patch.object(
             server, "RUNS_DB_PATH", os.path.join(self.data_dir, "console.sqlite3"))
         self._patch_db.start()
