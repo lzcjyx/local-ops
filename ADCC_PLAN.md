@@ -219,14 +219,14 @@ On Windows and macOS:
 
 ## Tasks
 
-- [ ] Implement `adcc` CLI as a daemon client.
-- [ ] Support `status`, `doctor`, project/resource listing, start/stop/restart, ports, runs and logs.
-- [ ] Add `--json` to read/query commands.
-- [ ] Define stable exit codes.
-- [ ] Detect daemon endpoint/token from user data directory.
-- [ ] Provide clear error when daemon is unavailable.
-- [ ] Do not duplicate process-management implementation in CLI.
-- [ ] Add CLI contract tests.
+- [x] Implement `adcc` CLI as a daemon client.
+- [x] Support `status`, `doctor`, project/resource listing, start/stop/restart, ports, runs and logs.
+- [x] Add `--json` to read/query commands.
+- [x] Define stable exit codes.
+- [x] Detect daemon endpoint/token from user data directory.
+- [x] Provide clear error when daemon is unavailable.
+- [x] Do not duplicate process-management implementation in CLI.
+- [x] Add CLI contract tests.
 
 ## Exit gate
 
@@ -562,6 +562,7 @@ Coding agents should update only the status field/check boxes, not rewrite compl
 | M2 | COMPLETE | passed | PlatformAdapter（macos/windows/unsupported，ADR-0002）；Windows 本地启停/端口/身份/外部进程安全实测通过；CI 矩阵落地（macOS 审计 + Windows 可移植 202 测试）双平台全绿，M1/M2 macOS parity 一并确认（check + release 构建 + 可重复性验证通过）。 |
 | M3 | COMPLETE | passed | 项目域落地（ADR-0003）：schema v2 + workspace/project/resource 模型与 registry、legacy apps 惰性幂等迁移（Unassigned 桶 + app_id 桥）、git root/MCP 检测、state 项目摘要 + 前端项目过滤；165 项测试 + 20 项新项目域测试通过，Windows CI 全绿。 |
 | M4 | COMPLETE | passed | ManagedRun + SQLite 历史 + /api/v1 + SSE（ADR-0004）：run 启停/退出/重启对账（lost 不伪造成功）、/api/v1 health/state/projects/resources/runs/logs、SSE 事件流；修复 Windows cmd 引号坑（临时批处理 + 文件名 token 身份）；189 项测试通过，Windows CI 全绿。 |
+| M5 | COMPLETE | passed | adcc CLI（ADR-0005）：daemon.json 端点发现、status/doctor/projects/resources/启停/ports/runs/logs + --json、退出码 0/1/2/3；修复 v1 启停 keep-alive 陷阱、CIM 缓存掩盖新进程、CLI 吞 ok:false、新 app 资源注册闭环；199 项测试通过。 |
 | M2 | NOT STARTED | pending | |
 | M3 | NOT STARTED | pending | |
 | M4 | NOT STARTED | pending | |

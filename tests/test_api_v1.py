@@ -49,6 +49,7 @@ class V1Harness:
         self.httpd.shutdown()
         self.httpd.server_close()
         self.thread.join(timeout=2)
+        time.sleep(0.8)  # 等待 watch 线程完成日志轮转，避免与清理竞态
         self.tmp.cleanup()
 
     def request(self, method, path, body=None, headers=None, timeout=15):

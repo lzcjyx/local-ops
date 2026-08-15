@@ -115,6 +115,10 @@ class WindowsPlatformAdapter(PlatformAdapter):
 
     # ------------------------------------------------------------ processes
 
+    def invalidate_cache(self):
+        """启动新进程后调用：清空全量 CIM 缓存，使身份识别立即可见。"""
+        self._full_cache = (0.0, None)
+
     def _cim_query(self, pids=None):
         """Full-table CIM query with TTL cache; filtering happens in Python.
 

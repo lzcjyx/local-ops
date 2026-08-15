@@ -1252,6 +1252,11 @@ def persist_started_app(cfg, app_id, proc, pgid, token):
         return False
     saved = cfg.update(op)
     if saved:
+        if hasattr(PLATFORM, "invalidate_cache"):
+            try:
+                PLATFORM.invalidate_cache()
+            except Exception:
+                pass
         record_run_start(cfg, app_id, proc, pgid, token)
         watch_app_exit(cfg, app_id, proc, token, started_at)
     return saved
@@ -2349,6 +2354,35 @@ def validate_app_fields(data, partial):
     return fields, None
 
 
+# ---------------------------------------------------------------- 资源注册桥
+
+def register_resource_for_app(c, app):
+    """新 app 创建时同步建立项目资源（M3/M4 补全：cwd 匹配项目，否则 Unassigned）。"""
+    from adcc.projects import create_resource, ensure_unassigned_project
+    project_id = None
+    cwd = app.get("cwd")
+    if isinstance(cwd, str) and cwd.strip():
+        try:
+            real = os.path.realpath(cwd)
+            for project in c.get("projects") or []:
+                try:
+                    if os.path.realpath(project.get("root_path")) == real:
+                        project_id = project.get("id")
+                        break
+                except OSError:
+                    continue
+        except OSError:
+            project_id = None
+    if project_id is None:
+        project_id = ensure_unassigned_project(c).get("id")
+    resource = create_resource(
+        c, project_id, app.get("name") or app.get("id"),
+        app.get("kind") or "service", app.get("command") or "",
+        cwd=app.get("cwd"), port=app.get("port"))
+    resource["app_id"] = app.get("id")
+    return resource
+
+
 # ---------------------------------------------------------------- HTTP 处理
 
 def serialized_app_operation(fn):
@@ -2866,6 +2900,7 @@ class Handler(BaseHTTPRequestHandler):
         collection, identifier, action = match.groups()
         if collection == "resources" and identifier and action in (
                 "start", "stop", "restart"):
+            self.discard_body()  # keep-alive 陷阱：不读掉会污染下一个请求
             self.handle_v1_resource_action(identifier, action)
             return
         self.send_err(404, "接口不存在")
@@ -3249,6 +3284,11 @@ class Handler(BaseHTTPRequestHandler):
                 attach_conflict[0] = True
                 return None
             c["apps"].append(app)
+            # M3/M4：同步注册项目资源（cwd 匹配项目或 Unassigned）
+            try:
+                register_resource_for_app(c, app)
+            except Exception:
+                LOG.exception("注册项目资源失败: %s", new_id)
             return dict(app)
 
         created = self.server.cfg.update(op)
@@ -3623,6 +3663,10 @@ class Handler(BaseHTTPRequestHandler):
         def op(c):
             before = len(c["apps"])
             c["apps"] = [a for a in c["apps"] if a.get("id") != app_id]
+            # M3/M4：同步清理对应项目资源（app_id 桥）
+            c["resources"] = [
+                r for r in c.get("resources") or []
+                if r.get("app_id") != app_id]
             return len(c["apps"]) != before
 
         if not self.server.cfg.update(op):
@@ -3845,6 +3889,7 @@ def _run_console(preferred_port=None, open_browser=True):
         sys.exit(1)
 
     print("总控台已启动: http://%s:%d/  (Ctrl+C 停止)" % (HOST, port), flush=True)
+    _write_daemon_endpoint(server)
     if open_browser:
         open_browser_later(port)
     try:
@@ -3853,7 +3898,31 @@ def _run_console(preferred_port=None, open_browser=True):
         pass
     finally:
         server.server_close()
+        _remove_daemon_endpoint()
         print("已停止", flush=True)
+
+
+def _daemon_endpoint_path():
+    return os.path.join(DATA_DIR, "daemon.json")
+
+
+def _write_daemon_endpoint(server):
+    """供 CLI 发现 daemon 端口/身份（M5 §17）。失败只降级不阻断启动。"""
+    try:
+        write_private_bytes(_daemon_endpoint_path(), json.dumps({
+            "port": server.console_port,
+            "pid": SELF_PID,
+            "token": server.control_token,
+        }).encode("utf-8"))
+    except OSError:
+        LOG.warning("无法写入 daemon.json（CLI 将无法发现 daemon）")
+
+
+def _remove_daemon_endpoint():
+    try:
+        os.remove(_daemon_endpoint_path())
+    except OSError:
+        pass
 
 
 def redirect_console_output():
