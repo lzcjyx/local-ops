@@ -333,7 +333,8 @@ class WorkflowExecutor:
 
     def _run_resource_step(self, step, run_id, step_run_id):
         """Service: started means success.  Task: wait for its run to end."""
-        resource_id = step["config"].get("resource_id")
+        config = step["config"]
+        resource_id = config.get("resource_id") or config.get("resourceId")
         resource = self._hooks.resolve_resource(resource_id)
         if resource is None:
             return None, "资源不存在: %s" % resource_id
@@ -363,7 +364,7 @@ class WorkflowExecutor:
 
     def _run_agent_step(self, step, run_id, step_run_id):
         config = step["config"]
-        adapter_id = config.get("adapter_id")
+        adapter_id = config.get("adapter_id") or config.get("adapterId")
         run = self._db.get_workflow_run(run_id)
         project_id = run.get("project_id") if run else None
         prompt = config.get("prompt")

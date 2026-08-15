@@ -64,10 +64,11 @@ def make_workflow(*, project_id, name, steps, version=1):
 
 
 def make_step(*, kind, config=None, needs=None, timeout_sec=None,
-              retry_policy=None, locks=None, continue_on_error=False):
+              retry_policy=None, locks=None, continue_on_error=False,
+              step_id=None):
     step = step_default()
     step.update({
-        "id": new_id(),
+        "id": step_id or new_id(),
         "kind": kind,
         "config": dict(config or {}),
         "needs": list(needs or []),
@@ -79,6 +80,15 @@ def make_step(*, kind, config=None, needs=None, timeout_sec=None,
     })
     validate_step(step)
     return step
+
+
+def config_value(config, *keys):
+    """Read a config key tolerating camelCase and snake_case spellings."""
+    for key in keys:
+        value = config.get(key)
+        if value is not None:
+            return value
+    return None
 
 
 def validate_step(step):
@@ -97,10 +107,10 @@ def validate_step(step):
     if not isinstance(config, dict):
         raise ValueError("step.config 必须是对象")
     if step.get("kind") in ("service", "task"):
-        if not config.get("resource_id"):
+        if not config_value(config, "resource_id", "resourceId"):
             raise ValueError("%s 步骤需要 config.resource_id" % step.get("kind"))
     if step.get("kind") == "agent":
-        if not config.get("adapter_id"):
+        if not config_value(config, "adapter_id", "adapterId"):
             raise ValueError("agent 步骤需要 config.adapter_id")
     if step.get("kind") == "gate":
         if not config.get("command"):

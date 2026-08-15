@@ -479,25 +479,25 @@ A user can complete the first-release journey in SPEC section 26 without CLI.
 
 ## Dogfood scenarios
 
-- [ ] ADCC manages its own daemon/task/test commands.
-- [ ] Register a web/backend project with multiple services.
-- [ ] Register a project with at least one MCP server.
-- [ ] Launch a real external coding-agent harness through command adapter.
-- [ ] Launch two parallel agent sessions in separate worktrees.
-- [ ] Execute `agent -> tests -> review/gate` workflow.
-- [ ] Restart the daemon while at least one independent managed service remains running, then reconcile it.
-- [ ] Deliberately create a port conflict and verify no unrelated process is killed.
-- [ ] Exercise failure/retry/cancel and inspect run history.
+- [x] ADCC manages its own daemon/task/test commands.
+- [x] Register a web/backend project with multiple services.
+- [x] Register a project with at least one MCP server.
+- [x] Launch a real external coding-agent harness through command adapter.
+- [x] Launch two parallel agent sessions in separate worktrees.
+- [x] Execute `agent -> tests -> review/gate` workflow.
+- [x] Restart the daemon while at least one independent managed service remains running, then reconcile it.
+- [x] Deliberately create a port conflict and verify no unrelated process is killed.
+- [x] Exercise failure/retry/cancel and inspect run history.
 
 ## Deliverables
 
 ```text
-CHANGELOG
-Known limitations
-Migration guide from local-ops
-Quick start
-Agent/MCP integration guide
-Architecture overview
+CHANGELOG                       -> docs/release/CHANGELOG.md
+Known limitations               -> docs/release/KNOWN_LIMITATIONS.md
+Migration guide from local-ops  -> docs/release/MIGRATION_GUIDE.md
+Quick start                     -> docs/release/QUICKSTART.md
+Agent/MCP integration guide     -> docs/release/AGENT_MCP_GUIDE.md
+Architecture overview           -> docs/release/ARCHITECTURE_OVERVIEW.md
 ```
 
 ## Exit gate — v0.1 usable
@@ -568,6 +568,8 @@ Coding agents should update only the status field/check boxes, not rewrite compl
 | M8 | COMPLETE | passed | Worktrees+锁+Orchestrator（ADR-0008）：ADCC 命名空间 worktree 安全创建/清理、LockManager（持久化恢复）、DAG 校验/拓扑调度/并行上限/service·task·agent·gate 步骤/策略重试/取消传播/重启恢复（lost 不发明成功）、API/CLI/MCP 接口；agent→test→reviewer→gate 集成 fixture 全过，247 项测试全绿。 |
 | M9 | COMPLETE | passed | Tauri 2 桌面壳（ADR-0009）：daemon 发现/启动/健康轮询、webview 承载既有 UI、托盘+关窗隐藏、通知、NSIS 打包（WiX 中文名问题规避）；debug/release 本机运行 smoke 通过（壳退出 daemon 独立存活），CI 双平台编译 smoke 全绿。 |
 | M10 | COMPLETE | passed | 控制中心 GUI（ADR-0010）：rail 6 视图（概览/项目/Agent/工作流新增）+ 表驱动视图切换、views.js 原生渲染（v1 数据 2.5s TTL）、项目资源一键启停、Agent 新建/停止、工作流运行/取消与步骤状态；前端检查与页面加载全绿。 |
+| M11 | COMPLETE | passed | 安全加固（ADR-0011）：mutating 强制本地凭证（cookie 或 X-ADCC-Token，常量时间比较）、模板注入测试（argv 无 shell）、SQLite 损坏降级修复（连接关闭）、SECURITY.md 凭证模型、macOS .app/.dmg 打包 CI 验证；251 项测试 + 双平台 CI 全绿。 |
+| M12 | COMPLETE | passed | Dogfood 发布验证：`tools/dogfood_release_check.py` 对 SPEC §26 十四项发布条件可执行验证 **13/13 通过**（含双项目、MCP 资源、agent 会话、隔离 worktree、agent→test→gate 工作流、重启对账、端口冲突不误杀）；发布文档六件套（CHANGELOG/已知限制/迁移指南/快速开始/Agent+MCP 指南/架构概述）；修复 dogfood 暴露的 2 个产品 bug（MCP 候选缺 _priority 崩溃、workflow step 用户 id 被忽略）；251 项测试全绿。 |
 | M2 | NOT STARTED | pending | |
 | M3 | NOT STARTED | pending | |
 | M4 | NOT STARTED | pending | |

@@ -1992,7 +1992,9 @@ def detect_project(root):
 
     # M3：MCP 服务器候选（.mcp.json / package.json mcp 字段，只读检测）
     for mcp in detect_mcp_servers(root):
-        candidates.append(mcp)
+        candidate = dict(mcp)
+        candidate.setdefault("_priority", 60)
+        candidates.append(candidate)
 
     candidates.sort(key=lambda item: item.pop("_priority"))
     return {
@@ -3239,7 +3241,8 @@ class Handler(BaseHTTPRequestHandler):
                         timeout_sec=raw.get("timeoutSec"),
                         retry_policy=raw.get("retryPolicy"),
                         locks=raw.get("locks"),
-                        continue_on_error=bool(raw.get("continueOnError"))))
+                        continue_on_error=bool(raw.get("continueOnError")),
+                        step_id=raw.get("id") or None))
                 workflow = make_workflow(
                     project_id=project_id, name=name, steps=normalized)
             except ValueError as exc:
