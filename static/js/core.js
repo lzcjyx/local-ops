@@ -7,9 +7,17 @@
 /* ---------------- 工具 ---------------- */
 export const $ = (s, r = document) => r.querySelector(s);
 
-export function el(tag, cls) {
+export function el(tag, cls, ...children) {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
+  for (const child of children) {
+    if (child == null) continue;
+    if (typeof child === 'string' || typeof child === 'number') {
+      e.appendChild(document.createTextNode(String(child)));
+    } else {
+      e.appendChild(child);
+    }
+  }
   return e;
 }
 /* 仅在文本变化时写 DOM，避免无谓重排 */

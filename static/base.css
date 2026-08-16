@@ -933,3 +933,26 @@
   font-size: 12px; color: var(--text-2, rgba(127,127,127,.85)); }
 .adapter-chip .chip-btn { padding: 2px 5px; }
 .adapter-empty { font-size: 12px; color: var(--text-2, rgba(127,127,127,.7)); }
+
+/* P1 产品化弹窗：select 与 input 同款样式，步骤编辑器 */
+.field select {
+  width: 100%; padding: 8px 12px;
+  border: 1px solid var(--line-2, rgba(127,127,127,.3));
+  border-radius: 8px; background: var(--card, transparent);
+  font: inherit; font-size: 13px; color: inherit;
+}
+.field select:focus { outline: none; border-color: var(--accent, #4f8cff);
+  box-shadow: 0 0 0 2.5px color-mix(in srgb, var(--accent, #4f8cff) 25%, transparent); }
+.wf-step-editor { display: flex; flex-direction: column; gap: 10px; max-height: 320px;
+  overflow-y: auto; margin: 4px 0; }
+.wf-step-card { border: 1px solid var(--line, rgba(127,127,127,.18));
+  border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.wf-step-head { display: flex; align-items: center; gap: 8px; }
+.wf-step-head select { flex: 1; width: auto; padding: 5px 8px; }
+.wf-step-head input { flex: 1; }
+.wf-step-config { display: flex; flex-direction: column; gap: 8px; }
+.needs-row { display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; }
+.needs-row label { display: inline-flex; align-items: center; gap: 4px; color: var(--ink-2, rgba(127,127,127,.85)); }
+.step-remove { align-self: flex-start; }
+
+.form-error { color: var(--red, #f87171) !important; display: flex; align-items: center; gap: 5px; margin-top: 4px; }

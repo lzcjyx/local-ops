@@ -7,7 +7,7 @@ import { $, el, setText, setChildren, icon, escapeHtml, fmtDuration } from './co
 import { openConfirm } from './overlays.js';
 
 let cachedV1 = { sessions: [], workflowRuns: [], workflows: [], worktrees: [],
-                 templates: [], adapters: [] };
+                 templates: [], adapters: [], projectsDetail: [] };
 let lastV1Fetch = 0;
 let busy = false;
 
@@ -82,7 +82,8 @@ async function ensureV1() {
   busy = true;
   lastV1Fetch = now;
   try {
-    const [sessions, workflowRuns, workflows, worktrees, templates, adapters] =
+    const [sessions, workflowRuns, workflows, worktrees, templates, adapters,
+           projectsDetail] =
       await Promise.all([
         fetchJson('/api/v1/agents/sessions?limit=100').catch(() => ({ sessions: [] })),
         fetchJson('/api/v1/workflow-runs?limit=50').catch(() => ({ runs: [] })),
@@ -90,6 +91,7 @@ async function ensureV1() {
         fetchJson('/api/v1/git/worktrees').catch(() => []),
         fetchJson('/api/v1/project-templates').catch(() => []),
         fetchJson('/api/v1/agents/adapters').catch(() => []),
+        fetchJson('/api/v1/projects').catch(() => []),
       ]);
     cachedV1 = {
       sessions: sessions.sessions || [],
@@ -98,6 +100,7 @@ async function ensureV1() {
       worktrees: Array.isArray(worktrees) ? worktrees : [],
       templates: Array.isArray(templates) ? templates : [],
       adapters: Array.isArray(adapters) ? adapters : [],
+      projectsDetail: Array.isArray(projectsDetail) ? projectsDetail : [],
     };
     renderViews(window.__state ? window.__state.data : null);
   } catch (e) {
@@ -120,7 +123,13 @@ function openModal(title, fields, onSave) {
       await onSave();
       overlay.remove();
       ensureV1();
-    } catch (e) { /* 静默 */ }
+    } catch (e) {
+      /* 保存失败：给出明确提示，弹窗保持打开 */
+      const hint = el('div', 'hint form-error',
+        icon('alert-triangle', 12) + ' ' + escapeHtml(e.message || '操作失败'));
+      modal.querySelectorAll('.form-error').forEach(n => n.remove());
+      modal.appendChild(hint);
+    }
   });
   close.addEventListener('click', () => overlay.remove());
   overlay.addEventListener('mousedown', e => {
@@ -128,14 +137,13 @@ function openModal(title, fields, onSave) {
   });
   const children = [el('h3', 'modal-title', title)];
   for (const field of fields) {
-    children.push(el('label', 'field-label', field.label));
-    children.push(field.node);
+    children.push(field.wrap || field);
   }
   children.push(el('div', 'modal-actions', close, save));
   setChildren(modal, ...children);
   overlay.appendChild(modal);
   document.body.appendChild(overlay);
-  return { overlay, close };
+  return { overlay, close, modal, save };
 }
 
 function textInput(placeholder) {
@@ -156,6 +164,63 @@ function selectNode(options, placeholder) {
     node.appendChild(option);
   }
   return node;
+}
+
+/* 与现有表单一致的表单字段（.field 结构，ops 主题样式） */
+function fieldWrap(label, node, hint) {
+  const wrapper = el('div', 'field');
+  const head = el('div', 'field-head');
+  setChildren(head, el('label', '', escapeHtml(label)));
+  wrapper.appendChild(head);
+  wrapper.appendChild(node);
+  if (hint) {
+    wrapper.appendChild(el('div', 'hint', hint));
+  }
+  return wrapper;
+}
+
+function fieldInput(label, placeholder, hint) {
+  return fieldWrap(label, textInput(placeholder), hint);
+}
+
+function fieldSelect(label, options, placeholder, hint) {
+  return fieldWrap(label, selectNode(options, placeholder), hint);
+}
+
+/* 带「选择文件夹」的路径字段（原生目录选择器） */
+function fieldDir(label, placeholder, hint) {
+  const input = textInput(placeholder);
+  const row = el('div', 'input-row');
+  row.appendChild(input);
+  const pick = el('button', 'btn', '选择…');
+  pick.type = 'button';
+  pick.addEventListener('click', async () => {
+    pick.disabled = true;
+    try {
+      const r = await postJson('/api/pick', { what: 'dir' });
+      if (r && !r.canceled && r.path) {
+        input.value = r.path;
+        const change = new Event('input', { bubbles: true });
+        input.dispatchEvent(change);
+      }
+    } catch (e) { /* 静默 */ }
+    pick.disabled = false;
+  });
+  row.appendChild(pick);
+  return { wrap: fieldWrap(label, row, hint), input };
+}
+
+/* 异步刷新下拉选项（模板/资源在 ensureV1 完成后回填） */
+function refreshSelectOptions(select, options, placeholder) {
+  setChildren(select);
+  const blank = el('option', '', placeholder || '请选择');
+  blank.value = '';
+  select.appendChild(blank);
+  for (const [value, label] of options) {
+    const option = el('option', '', escapeHtml(label));
+    option.value = value;
+    select.appendChild(option);
+  }
 }
 
 /* ================= 概览 ================= */
@@ -258,22 +323,34 @@ function importManifest() {
 }
 
 function openProjectModal() {
-  const nameInput = textInput('项目名称');
-  const pathInput = textInput('项目根路径（绝对路径）');
+  const dir = fieldDir('根路径', '项目根目录（可点「选择…」）',
+    '服务会自动按此目录归组到本项目');
+  const nameInput = textInput('项目名称（默认取目录名）');
+  const nameField = fieldWrap('名称', nameInput, '留空时使用根目录名');
   const templateSelect = selectNode(
     cachedV1.templates.map(t => [t.id, t.name + ' — ' + t.description]),
     '不使用模板');
+  if (!cachedV1.templates.length) {
+    fetchJson('/api/v1/project-templates').then(list => {
+      cachedV1.templates = Array.isArray(list) ? list : [];
+      refreshSelectOptions(
+        templateSelect,
+        cachedV1.templates.map(t => [t.id, t.name + ' — ' + t.description]),
+        '不使用模板');
+    }).catch(() => {});
+  }
   const overlay = openModal('新建项目', [
-    { label: '名称', node: nameInput },
-    { label: '根路径', node: pathInput },
-    { label: '模板（可选）', node: templateSelect },
+    dir.wrap,
+    nameField,
+    fieldWrap('模板（可选）', templateSelect,
+      '模板会预填一组资源（如 Web 前端开发服务器）'),
   ], async () => {
-    if (!nameInput.value.trim() || !pathInput.value.trim()) {
-      throw new Error('名称与路径必填');
-    }
+    const root = dir.input.value.trim();
+    if (!root) throw new Error('请选择项目根路径');
+    const fallback = root.split(/[\\/]/).pop() || '新项目';
     await postJson('/api/v1/projects', {
-      name: nameInput.value.trim(),
-      rootPath: pathInput.value.trim(),
+      name: nameInput.value.trim() || fallback,
+      rootPath: root,
       template: templateSelect.value || undefined,
     });
     window.__poll && window.__poll();
@@ -284,7 +361,9 @@ function openProjectModal() {
 function projectCard(project, data) {
   const card = el('article', 'project-card');
   const head = el('div', 'project-head');
-  const resources = project.resources || [];
+  // 资源详情来自 /api/v1/projects（/api/state 的 projects 是摘要）
+  const detail = cachedV1.projectsDetail.find(p => p.id === project.id);
+  const resources = (detail && detail.resources) || project.resources || [];
   const running = resources.filter(r => r.kind !== 'mcp_server' &&
     data.apps.some(a => a.id === r.appId && a.running)).length;
   setChildren(head,
@@ -381,15 +460,16 @@ function renderProjects(data) {
 
 /* ================= Agent ================= */
 function openAdapterModal() {
-  const nameInput = textInput('适配器名称（如 OpenCode）');
-  const executableInput = textInput('可执行文件（如 opencode）');
-  const argsInput = textInput('参数模板，逗号分隔（如 run,--prompt-file,{prompt_file}）');
-  const envInput = textInput('环境模板，KEY=VALUE 逗号分隔（可选）');
+  const nameInput = textInput('如 OpenCode / Codex / 自定义');
+  const executableInput = textInput('如 opencode、codex、python');
+  const argsInput = textInput('如 run,--prompt-file,{prompt_file}');
+  const envInput = textInput('如 ADCC_PROJECT_ID={project_id}（可选）');
   const overlay = openModal('注册 Agent 适配器', [
-    { label: '名称', node: nameInput },
-    { label: '可执行文件', node: executableInput },
-    { label: '参数模板', node: argsInput },
-    { label: '环境模板', node: envInput },
+    fieldWrap('名称', nameInput),
+    fieldWrap('可执行文件', executableInput,
+      '命令模板变量：{project_id} {session_id} {project_root} {prompt_file} {worktree_path}'),
+    fieldWrap('参数模板', argsInput, '逗号分隔；{prompt_file} 会写入提示词文件路径'),
+    fieldWrap('环境模板', envInput, '逗号分隔的 KEY=VALUE'),
   ], async () => {
     if (!nameInput.value.trim() || !executableInput.value.trim()) {
       throw new Error('名称与可执行文件必填');
@@ -408,10 +488,11 @@ function openAdapterModal() {
       stdinMode: 'file',
     });
   });
-  /* P1：探测已安装的编码 Agent，一键填充 */
+  /* 已安装 Agent 一键填充（探测 PATH） */
   fetchJson('/api/v1/agents/discovery').then(found => {
     if (!found || !found.length) return;
     const bar = el('div', 'agent-adapters');
+    bar.appendChild(el('span', 'adapter-empty', '已安装：'));
     for (const agent of found) {
       const chip = el('button', 'chip-btn', icon('bot', 12) + ' ' +
         escapeHtml(agent.label));
@@ -423,7 +504,7 @@ function openAdapterModal() {
       });
       bar.appendChild(chip);
     }
-    const title = overlay.close.parentElement.querySelector('.modal-title');
+    const title = overlay.modal.querySelector('.modal-title');
     if (title) title.parentElement.insertBefore(bar, title.nextSibling);
   }).catch(() => {});
 }
@@ -442,12 +523,14 @@ function openAgentModal() {
     projects.map(p => [p.id, p.name]),
     '选择项目');
   const promptInput = el('textarea');
-  promptInput.rows = 4;
-  promptInput.placeholder = '提示词（prompt）';
+  promptInput.rows = 5;
+  promptInput.placeholder = '例如：实现 xxx 功能并补充测试，完成后汇报改动摘要';
   openModal('新建 Agent 会话', [
-    { label: '适配器', node: adapterSelect },
-    { label: '项目', node: projectSelect },
-    { label: '提示词', node: promptInput },
+    fieldWrap('适配器', adapterSelect,
+      '尚未注册适配器？先点「注册适配器」。'),
+    fieldWrap('项目', projectSelect),
+    fieldWrap('提示词', promptInput,
+      '提示词会写入会话文件并注入 {prompt_file}'),
   ], async () => {
     if (!adapterSelect.value || !projectSelect.value) {
       throw new Error('请选择适配器与项目');
@@ -571,39 +654,195 @@ function renderAgents() {
 
 /* ================= 工作流 ================= */
 function openWorkflowModal() {
-  const nameInput = textInput('工作流名称');
+  const nameInput = textInput('如：实现→测试→评审');
   const projects = (window.__state && window.__state.data &&
     window.__state.data.projects) || [];
   const projectSelect = selectNode(
     projects.map(p => [p.id, p.name]),
     '选择项目');
-  const stepsInput = el('textarea');
-  stepsInput.rows = 10;
-  stepsInput.placeholder =
-    '步骤 JSON 数组，例如：\n' +
-    '[{"id":"impl","kind":"agent","config":{"adapterId":"<adapter>","prompt":"实现功能"}},\n' +
-    ' {"id":"tests","kind":"task","needs":["impl"],"config":{"resourceId":"<resource>"}},\n' +
-    ' {"id":"gate","kind":"gate","needs":["tests"],"config":{"command":"python -m pytest"}}]';
-  openModal('新建工作流（DAG）', [
-    { label: '名称', node: nameInput },
-    { label: '项目', node: projectSelect },
-    { label: '步骤（JSON）', node: stepsInput },
-  ], async () => {
-    let steps;
-    try {
-      steps = JSON.parse(stepsInput.value || '[]');
-    } catch (e) {
-      throw new Error('步骤不是合法 JSON');
+  const steps = [];            // {id, kind, config, needs}
+  const stepRows = [];         // DOM 行
+  const editor = el('div', 'wf-step-editor');
+
+  function projectResources() {
+    // 实时读取 /api/v1 的项目详情（含 resources）
+    const projectId = projectSelect.value;
+    const project = cachedV1.projectsDetail.find(p => p.id === projectId);
+    return (project && project.resources) || [];
+  }
+
+  function rebuildNeeds() {
+    for (const row of stepRows) {
+      const box = row.querySelector('.needs-box');
+      setChildren(box);
+      if (steps.length <= 1) {
+        box.appendChild(el('span', 'adapter-empty', '无依赖步骤'));
+        continue;
+      }
+      for (const other of steps) {
+        if (other.id === row._step.id) continue;
+        const label = el('label');
+        const check = el('input');
+        check.type = 'checkbox';
+        check.checked = row._step.needs.includes(other.id);
+        check.addEventListener('change', () => {
+          const index = row._step.needs.indexOf(other.id);
+          if (check.checked && index < 0) row._step.needs.push(other.id);
+          if (!check.checked && index >= 0) row._step.needs.splice(index, 1);
+        });
+        label.appendChild(check);
+        label.appendChild(document.createTextNode(' ' + other.id));
+        box.appendChild(label);
+      }
     }
+  }
+
+  function renderStepConfig(row) {
+    const step = row._step;
+    const configBox = row.querySelector('.wf-step-config');
+    setChildren(configBox);
+    const kind = step.kind;
+    if (kind === 'service' || kind === 'task') {
+      const resources = projectResources();
+      const resourceSelect = selectNode(
+        resources.map(r => [r.id, r.name + '（' + r.kind + '）']),
+        '选择资源');
+      resourceSelect.value = step.config.resourceId || '';
+      resourceSelect.addEventListener('change', () => {
+        step.config.resourceId = resourceSelect.value;
+      });
+      configBox.appendChild(fieldWrap(
+        kind === 'task' ? '任务资源' : '服务资源', resourceSelect,
+        '运行前会先校验配置健康与端口占用'));
+    } else if (kind === 'agent') {
+      const adapterSelect = selectNode(
+        cachedV1.adapters.map(a => [a.id, a.name]),
+        '选择适配器');
+      adapterSelect.value = step.config.adapterId || '';
+      adapterSelect.addEventListener('change', () => {
+        step.config.adapterId = adapterSelect.value;
+      });
+      const promptInput = textInput('给 Agent 的提示词（可选）');
+      promptInput.value = step.config.prompt || '';
+      promptInput.addEventListener('input', () => {
+        step.config.prompt = promptInput.value;
+      });
+      configBox.appendChild(fieldWrap('适配器', adapterSelect));
+      configBox.appendChild(fieldWrap('提示词', promptInput));
+    } else if (kind === 'gate') {
+      const commandInput = textInput('如 python -m pytest -q');
+      commandInput.value = step.config.command || '';
+      commandInput.addEventListener('input', () => {
+        step.config.command = commandInput.value;
+      });
+      configBox.appendChild(fieldWrap('验证命令', commandInput,
+        '退出码 0 视为通过；失败会阻断下游必需步骤'));
+    }
+    configBox.appendChild(fieldWrap('依赖步骤', (() => {
+      const box = el('div', 'needs-row needs-box');
+      return box;
+    })()));
+  }
+
+  function addStep() {
+    const step = { id: 'step' + (steps.length + 1), kind: 'task',
+      config: {}, needs: [] };
+    steps.push(step);
+    const row = el('div', 'wf-step-card');
+    row._step = step;
+    const head = el('div', 'wf-step-head');
+    const kindSelect = selectNode([
+      ['task', '任务 task'], ['service', '服务 service'],
+      ['agent', 'Agent agent'], ['gate', '门禁 gate']], '步骤类型');
+    kindSelect.value = step.kind;
+    kindSelect.addEventListener('change', () => {
+      step.kind = kindSelect.value;
+      step.config = {};
+      renderStepConfig(row);
+    });
+    const idInput = textInput('步骤 id（如 tests）');
+    idInput.value = step.id;
+    idInput.addEventListener('input', () => {
+      step.id = idInput.value.trim() || step.id;
+    });
+    const remove = el('button', 'btn btn-sm ghost step-remove', '删除');
+    remove.type = 'button';
+    remove.addEventListener('click', () => {
+      steps.splice(steps.indexOf(step), 1);
+      stepRows.splice(stepRows.indexOf(row), 1);
+      row.remove();
+      rebuildNeeds();
+    });
+    setChildren(head, kindSelect, idInput, remove);
+    const configBox = el('div', 'wf-step-config');
+    row.append(head, configBox);
+    stepRows.push(row);
+    editor.appendChild(row);
+    renderStepConfig(row);
+    rebuildNeeds();
+  }
+
+  projectSelect.addEventListener('change', () => {
+    for (const row of stepRows) renderStepConfig(row);
+    // 拉取所选项目的最新资源（弹窗打开时 projectsDetail 可能尚未加载）
+    fetchJson('/api/v1/projects').then(list => {
+      cachedV1.projectsDetail = Array.isArray(list) ? list : [];
+      for (const row of stepRows) renderStepConfig(row);
+    }).catch(() => {});
+  });
+
+  const overlay = openModal('新建工作流', [
+    fieldWrap('名称', nameInput),
+    fieldWrap('项目', projectSelect),
+    (() => {
+      const wrap = el('div', 'field');
+      const head = el('div', 'field-head');
+      setChildren(head, el('label', '', '步骤（DAG）'));
+      wrap.appendChild(head);
+      const add = el('button', 'btn btn-sm wf-add-step',
+        icon('plus', 12) + ' 添加步骤');
+      add.type = 'button';
+      add.addEventListener('click', addStep);
+      wrap.append(editor, add);
+      return wrap;
+    })(),
+  ], async () => {
     if (!nameInput.value.trim() || !projectSelect.value) {
       throw new Error('名称与项目必填');
+    }
+    if (!steps.length) throw new Error('请至少添加一个步骤');
+    const payload = [];
+    for (const step of steps) {
+      const config = {};
+      if (step.kind === 'service' || step.kind === 'task') {
+        if (!step.config.resourceId) throw new Error('步骤 ' + step.id +
+          '：请选择资源');
+        config.resourceId = step.config.resourceId;
+      } else if (step.kind === 'agent') {
+        if (!step.config.adapterId) throw new Error('步骤 ' + step.id +
+          '：请选择适配器');
+        config.adapterId = step.config.adapterId;
+        if (step.config.prompt) config.prompt = step.config.prompt;
+      } else if (step.kind === 'gate') {
+        if (!step.config.command || !step.config.command.trim()) {
+          throw new Error('步骤 ' + step.id + '：请填写验证命令');
+        }
+        config.command = step.config.command.trim();
+      }
+      payload.push({
+        id: step.id,
+        kind: step.kind,
+        config,
+        needs: step.needs.slice(),
+      });
     }
     await postJson('/api/v1/workflows', {
       name: nameInput.value.trim(),
       projectId: projectSelect.value,
-      steps,
+      steps: payload,
     });
   });
+  addStep();  // 预置一个步骤引导
 }
 
 function workflowCard(wf) {

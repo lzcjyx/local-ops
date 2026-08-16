@@ -74,6 +74,10 @@ function switchView(v) {
     void meta.section.offsetWidth;
     meta.section.classList.add('active');
   }
+  /* 切换视图时立即渲染（模板/会话/工作流数据即时可用） */
+  if (state.data && typeof renderViews === 'function') {
+    renderViews(state.data);
+  }
 }
 function applyView() {
   const v = state.view;
