@@ -4,6 +4,7 @@
    P1：项目新建（模板）、适配器注册、工作流创建、会话日志展开。 */
 
 import { $, el, setText, setChildren, icon, escapeHtml, fmtDuration } from './core.js';
+import { openConfirm } from './overlays.js';
 
 let cachedV1 = { sessions: [], workflowRuns: [], workflows: [], worktrees: [],
                  templates: [], adapters: [] };
@@ -23,6 +24,37 @@ async function postJson(url, body) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body || {}),
+  });
+}
+
+async function deleteJson(url) {
+  const r = await fetch(url, { method: 'DELETE', cache: 'no-store' });
+  if (!r.ok) {
+    let message = 'HTTP ' + r.status;
+    try {
+      const payload = await r.json();
+      if (payload && payload.error) message = payload.error;
+    } catch (e) { /* 静默 */ }
+    throw new Error(message);
+  }
+  return r.json();
+}
+
+function confirmDelete(title, detail, onOk) {
+  openConfirm({
+    title,
+    bodyHtml: '<div class="confirm-detail">' + escapeHtml(detail) + '</div>',
+    okText: '删除',
+    tone: 'danger',
+    onOk: async () => {
+      try {
+        await onOk();
+        window.__poll && window.__poll();
+        ensureV1();
+      } catch (e) {
+        window.__toast ? window.__toast('删除失败：' + e.message) : null;
+      }
+    },
   });
 }
 
@@ -227,6 +259,15 @@ function projectCard(project, data) {
     el('div', 'project-title', escapeHtml(project.name)),
     el('span', 'project-meta',
       resources.length + ' 资源 · ' + running + ' 运行中'));
+  const deleteBtn = el('button', 'icon-btn sm danger', icon('trash-2', 13));
+  deleteBtn.type = 'button';
+  deleteBtn.title = '删除项目';
+  deleteBtn.setAttribute('aria-label', '删除项目');
+  deleteBtn.addEventListener('click', () => {
+    confirmDelete('删除项目', '项目「' + project.name + '」及其未分配资源将被移除（受管应用保留）。',
+      async () => deleteJson('/api/v1/projects/' + project.id));
+  });
+  head.appendChild(deleteBtn);
   const body = el('div', 'project-body');
   const sessions = cachedV1.sessions.filter(s => s.projectId === project.id);
   const workflows = cachedV1.workflows.filter(w => w.projectId === project.id);
@@ -249,9 +290,10 @@ function projectCard(project, data) {
   if (!lines.length) lines.push(el('div', 'project-line', '（无额外信息）'));
   setChildren(body, ...lines);
   const actions = el('div', 'project-actions');
-  for (const resource of resources.slice(0, 6)) {
+  for (const resource of resources.slice(0, 8)) {
     const app = data.apps.find(a => a.id === resource.appId);
     const runningNow = !!(app && app.running);
+    const group = el('span', 'chip-group');
     const btn = el('button', 'chip-btn' + (runningNow ? ' running' : ''),
       (runningNow ? icon('square', 12) : icon('play', 12)) + ' ' +
       escapeHtml(resource.name));
@@ -264,7 +306,17 @@ function projectCard(project, data) {
       window.__poll && window.__poll();
       ensureV1();
     });
-    actions.appendChild(btn);
+    const remove = el('button', 'chip-btn danger', icon('x', 11));
+    remove.type = 'button';
+    remove.title = '删除资源';
+    remove.setAttribute('aria-label', '删除资源 ' + resource.name);
+    remove.addEventListener('click', () => {
+      confirmDelete('删除资源', '资源「' + resource.name +
+        '」及其关联应用将被删除。',
+        async () => deleteJson('/api/v1/resources/' + resource.id));
+    });
+    group.append(btn, remove);
+    actions.appendChild(group);
   }
   card.append(head, body, actions);
   return card;
@@ -422,9 +474,34 @@ function renderAgents() {
   const adapters = cachedV1.adapters || [];
   setChildren(list);
   setText($('#agentsCount'), String(cachedV1.sessions.length));
+  /* 适配器管理区 */
+  const adapterBar = el('div', 'agent-adapters');
+  if (adapters.length) {
+    for (const adapter of adapters) {
+      const chip = el('span', 'adapter-chip',
+        icon('bot', 12) + ' ' + escapeHtml(adapter.name) +
+        (adapter.cost && adapter.cost.model
+          ? ' · ' + escapeHtml(adapter.cost.model) : ''));
+      const remove = el('button', 'chip-btn danger', icon('x', 11));
+      remove.type = 'button';
+      remove.title = '删除适配器';
+      remove.setAttribute('aria-label', '删除适配器 ' + adapter.name);
+      remove.addEventListener('click', () => {
+        confirmDelete('删除适配器', '适配器「' + adapter.name +
+          '」将被移除（历史会话保留）。',
+          async () => deleteJson('/api/v1/agents/adapters/' + adapter.id));
+      });
+      chip.appendChild(remove);
+      adapterBar.appendChild(chip);
+    }
+  } else {
+    adapterBar.appendChild(el('span', 'adapter-empty',
+      '尚未注册适配器。点击「注册适配器」添加。'));
+  }
+  list.appendChild(adapterBar);
   if (!cachedV1.sessions.length) {
-    setChildren(list, el('div', 'empty-state',
-      '暂无 Agent 会话。「注册适配器」后即可启动外部编码 Agent。'));
+    list.appendChild(el('div', 'empty-state',
+      '暂无 Agent 会话。注册适配器后即可启动外部编码 Agent。'));
     return;
   }
   for (const session of cachedV1.sessions) {
@@ -479,11 +556,44 @@ function workflowCard(wf) {
     el('div', 'wf-title', escapeHtml(wf.name)),
     el('span', 'wf-meta', wf.steps.length + ' 步骤 · ' +
       (latest ? statusLabel(latest.status) : '未运行')));
+  const deleteBtn = el('button', 'icon-btn sm danger', icon('trash-2', 13));
+  deleteBtn.type = 'button';
+  deleteBtn.title = '删除工作流';
+  deleteBtn.setAttribute('aria-label', '删除工作流');
+  deleteBtn.addEventListener('click', () => {
+    confirmDelete('删除工作流', '工作流「' + wf.name +
+      '」将被移除（运行历史保留）。运行中时会被拒绝。',
+      async () => deleteJson('/api/v1/workflows/' + wf.id));
+  });
+  head.appendChild(deleteBtn);
   const body = el('div', 'wf-body');
-  const steps = (wf.steps || []).map(step =>
-    escapeHtml(step.kind) + (step.needs && step.needs.length
-      ? ' ← ' + step.needs.length : ''));
-  setChildren(body, el('div', 'wf-steps mono', steps.join(' · ')));
+  /* DAG 步骤图：按拓扑顺序横排步骤卡，依赖用箭头标注（P1 轻量可视化） */
+  const steps = wf.steps || [];
+  const dag = el('div', 'wf-dag');
+  const stepById = {};
+  for (const step of steps) stepById[step.id] = step;
+  const ordered = steps.slice();
+  for (const step of steps) {
+    const needs = step.needs || [];
+    if (!needs.length) continue;
+    for (const need of needs) {
+      const from = stepById[need];
+      if (from) {
+        ordered.splice(ordered.indexOf(step), 0, ordered.splice(
+          ordered.indexOf(from), 1)[0]);
+      }
+    }
+  }
+  for (const step of ordered) {
+    const node = el('span', 'dag-node ' + step.kind, escapeHtml(step.id));
+    node.title = step.kind + (step.needs && step.needs.length
+      ? ' ← ' + step.needs.join(',') : '');
+    dag.appendChild(node);
+    if (ordered.indexOf(step) < ordered.length - 1) {
+      dag.appendChild(el('span', 'dag-arrow', icon('chevron-right', 12)));
+    }
+  }
+  body.appendChild(dag);
   if (latest) {
     const stepLines = (latest.steps || []).map(sr =>
       el('div', 'wf-step-line',

@@ -4196,6 +4196,9 @@ class Handler(BaseHTTPRequestHandler):
             if not self.authorize_request(mutating=True):
                 return
             path = urllib.parse.urlparse(self.path).path
+            if path.startswith("/api/v1/"):
+                self.handle_v1_delete(path)
+                return
             m = APP_ROUTE_RE.match(path)
             if not m:
                 self.send_err(404, "接口不存在")
@@ -4212,6 +4215,109 @@ class Handler(BaseHTTPRequestHandler):
             pass
         except Exception as e:
             self._handle_request_error("DELETE", e)
+
+    def handle_v1_delete(self, path):
+        """P1 管理删除：项目/资源/适配器/工作流（联动清理）。"""
+        runner = get_agent_runner(self.server.cfg)
+        if path.startswith("/api/v1/projects/") and \
+                path.count("/") == 4:
+            project_id = path[len("/api/v1/projects/"):]
+            from adcc.projects import delete_project
+            try:
+                def op(c):
+                    return delete_project(c, project_id)
+                deleted = self.server.cfg.update(op)
+            except ValueError as exc:
+                self.send_err(400, str(exc))
+                return
+            if not deleted:
+                self.send_err(404, "项目不存在")
+                return
+            EVENTS.publish("project.updated", {"id": project_id})
+            self.send_json({"ok": True})
+            return
+        if path.startswith("/api/v1/resources/"):
+            resource_id = path[len("/api/v1/resources/"):]
+            snapshot = self.server.cfg.snapshot()
+            resource = next(
+                (r for r in snapshot.get("resources") or []
+                 if r.get("id") == resource_id), None)
+            if resource is None:
+                self.send_err(404, "资源不存在")
+                return
+            app_id = resource.get("app_id")
+            if app_id:
+                app = find_app(snapshot, app_id)
+                if app is not None:
+                    if app_running(app):
+                        ok, error = stop_app_and_clear(
+                            self.server.cfg, app)
+                        if not ok:
+                            self.send_json(
+                                {"ok": False,
+                                 "error": "删除已取消：%s" % error}, 409)
+                            return
+                    def delete_app_op(c):
+                        before = len(c.get("apps") or [])
+                        c["apps"] = [a for a in c.get("apps") or []
+                                     if a.get("id") != app_id]
+                        return len(c["apps"]) != before
+                    self.server.cfg.update(delete_app_op)
+            def op(c):
+                from adcc.projects import delete_resource
+                return delete_resource(c, resource_id)
+            self.server.cfg.update(op)
+            self.send_json({"ok": True})
+            return
+        if path.startswith("/api/v1/agents/adapters/"):
+            adapter_id = path[len("/api/v1/agents/adapters/"):]
+            if runner is None:
+                self.send_err(503, "运行历史数据库不可用")
+                return
+            snapshot = self.server.cfg.snapshot()
+            adapter = next(
+                (a for a in snapshot.get("agent_adapters") or []
+                 if a.get("id") == adapter_id), None)
+            if adapter is None:
+                self.send_err(404, "适配器不存在")
+                return
+            def op(c):
+                before = len(c.get("agent_adapters") or [])
+                c["agent_adapters"] = [
+                    a for a in c.get("agent_adapters") or []
+                    if a.get("id") != adapter_id]
+                return len(c["agent_adapters"]) != before
+            self.server.cfg.update(op)
+            self.send_json({"ok": True})
+            return
+        if path.startswith("/api/v1/workflows/"):
+            workflow_id = path[len("/api/v1/workflows/"):]
+            snapshot = self.server.cfg.snapshot()
+            workflow = next(
+                (w for w in snapshot.get("workflows") or []
+                 if w.get("id") == workflow_id), None)
+            if workflow is None:
+                self.send_err(404, "工作流不存在")
+                return
+            db = get_runs_db()
+            if db is not None and db.get_running_workflow_runs():
+                running = [r for r in db.get_running_workflow_runs()
+                           if r.get("workflow_id") == workflow_id]
+                if running:
+                    self.send_json(
+                        {"ok": False,
+                         "error": "工作流仍有运行中的实例，请先取消"}, 409)
+                    return
+            def op(c):
+                before = len(c.get("workflows") or [])
+                c["workflows"] = [
+                    w for w in c.get("workflows") or []
+                    if w.get("id") != workflow_id]
+                return len(c["workflows"]) != before
+            self.server.cfg.update(op)
+            self.send_json({"ok": True})
+            return
+        self.send_err(404, "接口不存在")
 
     def do_OPTIONS(self):
         # No CORS endpoint exists. An explicit denial is clearer than the

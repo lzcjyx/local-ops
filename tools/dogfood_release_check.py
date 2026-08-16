@@ -243,6 +243,35 @@ def main():
         assert any(w["branch"] == branch for w in list_worktrees(repo))
     check(7, "隔离 worktree", v7)
 
+    # 8. 查看 agent 实时日志与最终退出状态（M12 补全）。
+    def v8():
+        status, adapter = client.post("/api/v1/agents/adapters", {
+            "name": "fake-short", "executable": sys.executable,
+            "argsTemplate": [fake_agent, "{prompt_file}"],
+            "envTemplate": {"D": "1"}})
+        assert status == 201, adapter
+        status, session = client.post("/api/v1/agents/sessions", {
+            "adapterId": adapter["id"], "projectId": project_ids[0],
+            "prompt": "写日志的任务"})
+        assert status == 201, session
+        session_id = session["id"]
+        status, logs = client.get(
+            "/api/v1/agents/sessions/%s/logs?tail=200" % session_id)
+        assert status == 200
+        assert isinstance(logs.get("text"), str)  # 实时日志可读
+        deadline = time.time() + 20
+        current = None
+        while time.time() < deadline:
+            status, current = client.get(
+                "/api/v1/agents/sessions/%s" % session_id)
+            if current["status"] not in ("running", "queued", "starting"):
+                break
+            time.sleep(0.5)
+        assert status == 200
+        assert current["status"] in ("succeeded", "failed", "stopped", "lost")
+        assert current.get("endedAt") is not None  # 退出状态可查
+    check(8, "agent 日志与退出状态", v8)
+
     # 9. agent → test → review → gate 工作流。
     def v9():
         test_app = client.post("/api/apps", {

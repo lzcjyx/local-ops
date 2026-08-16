@@ -1,6 +1,7 @@
 # 总控台 (Console)
 
-本地服务监控与快速启动控制台。**零依赖**：Python 3 标准库后端（单文件）+ 无构建原生前端。推荐双击 `总控台.app` 后台运行（不显示 Terminal/Dock）；`start.command` 保留为终端调试入口。
+本地服务监控与快速启动控制台，已演进为 **AI Dev Control Center (ADCC)**：
+跨平台（Windows/macOS，Linux 适配器已实现）本地开发控制平面。**零依赖**：Python 3 标准库后端（`server.py` 兼容入口 + `adcc/` 包）+ 无构建原生前端 + Tauri 2 桌面壳。推荐双击 `总控台.app`（macOS）或桌面壳/`python server.py`（Windows）后台运行。
 
 ## 结构
 
