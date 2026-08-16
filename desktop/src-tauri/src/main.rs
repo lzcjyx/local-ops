@@ -273,6 +273,10 @@ fn restart_daemon(app: &tauri::AppHandle) -> Result<(), String> {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,  // 仅 macOS 生效
+            None,
+        ))
         .setup(|app| {
             let (port, started) = match ensure_daemon(app.handle()) {
                 Ok(result) => result,

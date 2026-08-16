@@ -45,6 +45,13 @@ from adcc.core.constants import (
 from adcc.core.errors import ConfigSchemaError, FutureConfigSchemaError
 from adcc.core.events import EventBus
 from adcc.agents import AgentRunner, make_adapter, validate_adapter
+from adcc.agents.discovery import discover_agents, suggest_adapter
+from adcc.projects.templates import (
+    apply_template,
+    export_manifest,
+    import_manifest,
+    list_templates,
+)
 from adcc.orchestrator import (
     ExecutorHooks,
     LockManager,
@@ -165,7 +172,11 @@ def read_project_version(path=VERSION_PATH):
 
 APP_VERSION, VERSION_LOAD_ERROR = read_project_version()
 
-HOST = "127.0.0.1"
+# P1 远程只读：CONSOLE_REMOTE_READONLY=1 显式启用；此时可绑定非回环地址。
+REMOTE_READONLY = (os.environ.get("CONSOLE_REMOTE_READONLY") or "").strip() == "1"
+HOST = os.environ.get("CONSOLE_BIND_HOST") or "127.0.0.1"
+if REMOTE_READONLY and HOST in ("127.0.0.1", "localhost", "::1"):
+    HOST = "0.0.0.0"  # 只读模式默认监听所有接口（显式启用时才生效）
 PORT_START = 9600
 PORT_TRIES = 10
 SUBPROCESS_TIMEOUT = 5          # lsof/ps 等子进程超时（秒）
@@ -2251,6 +2262,11 @@ def rotate_log_file(path, max_bytes=MAX_LOG_BYTES, backups=LOG_BACKUPS):
             return False
 
 
+def _tail_file(path, count):
+    """Read the last ``count`` lines of a file (bounded)."""
+    return "".join(_tail_file_lines(path, count))
+
+
 def _tail_file_lines(path, count, block_size=65536):
     try:
         with open(path, "rb") as f:
@@ -2701,7 +2717,12 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("%s - %s\n" % (self.client_address[0], fmt % args))
 
     def _parsed_request_host(self):
-        """Return (hostname, port) only for the exact local console origin."""
+        """Return (hostname, port) for the console origin.
+
+        Loopback mode accepts only the exact local console origin; remote
+        read-only mode (explicitly enabled, P1) accepts any Host header
+        and relies on the read-only + token posture instead.
+        """
         raw = (self.headers.get("Host") or "").strip()
         if not raw or any(ch in raw for ch in "\r\n,@/"):
             return None
@@ -2711,7 +2732,8 @@ class Handler(BaseHTTPRequestHandler):
             port = parsed.port
         except (ValueError, UnicodeError):
             return None
-        if hostname not in ("127.0.0.1", "localhost", "::1"):
+        if not REMOTE_READONLY and hostname not in (
+                "127.0.0.1", "localhost", "::1"):
             return None
         if port != self.server.console_port:
             return None
@@ -2720,6 +2742,8 @@ class Handler(BaseHTTPRequestHandler):
     def _request_host_allowed(self):
         if self._parsed_request_host() is None:
             return False
+        if REMOTE_READONLY:
+            return True  # 只读 + token 姿态；远程面板显式启用
         try:
             return self.client_address[0] in ("127.0.0.1", "::1")
         except (AttributeError, IndexError):
@@ -2781,6 +2805,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._deny_request(421, "请求 Host 不是当前本地控制台")
         if not mutating:
             return True
+        if REMOTE_READONLY:
+            # 远程只读模式：全部写操作拒绝（P1）
+            return self._deny_request(403, "远程只读模式不接受写操作")
 
         site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
         origin = (self.headers.get("Origin") or "").strip()
@@ -3028,6 +3055,15 @@ class Handler(BaseHTTPRequestHandler):
             snapshot = self.server.cfg.snapshot()
             self.send_json(_v1_projects(snapshot))
             return
+        if path == "/api/v1/project-templates":
+            self.send_json(list_templates())
+            return
+        if path == "/api/v1/projects/export":
+            self.send_json(export_manifest(self.server.cfg.snapshot()))
+            return
+        if path == "/api/v1/agents/discovery":
+            self.send_json(discover_agents())
+            return
         if path == "/api/v1/resources":
             snapshot = self.server.cfg.snapshot()
             self.send_json(_v1_resources(snapshot))
@@ -3055,7 +3091,21 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/v1/agents/sessions/"):
             runner = get_agent_runner(self.server.cfg)
-            session_id = path[len("/api/v1/agents/sessions/"):]
+            remainder = path[len("/api/v1/agents/sessions/"):]
+            if remainder.endswith("/logs"):
+                session_id = remainder[:-len("/logs")]
+                session = runner.get_session(session_id) if runner else None
+                if session is None:
+                    self.send_err(404, "会话不存在")
+                    return
+                tail = self._parse_log_tail(query)
+                log_path = session.get("log_path")
+                text = ""
+                if log_path and os.path.isfile(log_path):
+                    text = _tail_file(log_path, tail)
+                self.send_json({"sessionId": session_id, "text": text})
+                return
+            session_id = remainder
             session = runner.get_session(session_id) if runner else None
             if session is None:
                 self.send_err(404, "会话不存在")
@@ -3196,9 +3246,54 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as e:
                 self.send_err(400, str(e))
                 return
+            template_id = data.get("template")
+            if template_id:
+                try:
+                    def apply_op(c):
+                        return apply_template(c, project["id"], template_id)
+                    self.server.cfg.update(apply_op)
+                except ValueError as e:
+                    self.send_json({
+                        "ok": False,
+                        "error": "项目已创建，但模板应用失败: %s" % e}, 201)
+                    return
             EVENTS.publish("project.updated",
                            {"id": project.get("id")})
             self.send_json(project, 201)
+            return
+        if path == "/api/v1/projects/import":
+            data, err = self.read_json_body()
+            if err:
+                self.send_err(400, err)
+                return
+            try:
+                def op(c):
+                    return import_manifest(c, data)
+                result = self.server.cfg.update(op)
+            except ValueError as e:
+                self.send_err(400, str(e))
+                return
+            self.send_json({"ok": True, **result})
+            return
+        if path.startswith("/api/v1/projects/") and \
+                path.endswith("/template"):
+            project_id = path[len("/api/v1/projects/"):-len("/template")]
+            data, err = self.read_json_body()
+            if err:
+                self.send_err(400, err)
+                return
+            template_id = str(data.get("template") or "").strip()
+            if not template_id:
+                self.send_err(400, "template 必填")
+                return
+            try:
+                def op(c):
+                    return apply_template(c, project_id, template_id)
+                created = self.server.cfg.update(op)
+            except ValueError as e:
+                self.send_err(400, str(e))
+                return
+            self.send_json({"ok": True, "created": len(created)})
             return
         match = self.V1_ROUTE_RE.match(path)
         if not match:
@@ -3313,10 +3408,26 @@ class Handler(BaseHTTPRequestHandler):
                     env_template=data.get("envTemplate"),
                     cwd_template=data.get("cwdTemplate"),
                     stdin_mode=data.get("stdinMode") or "file",
+                    cost=data.get("cost"),
+                    token_budget=data.get("tokenBudget"),
                 )
             except ValueError as exc:
                 self.send_err(400, str(exc))
                 return
+            runner.add_adapter(adapter)
+            self.send_json(adapter, 201)
+            return
+        if path == "/api/v1/agents/discovery/register":
+            data, err = self.read_json_body()
+            if err:
+                self.send_err(400, err)
+                return
+            executable = str(data.get("executable") or "").strip()
+            adapter = suggest_adapter(executable)
+            if adapter is None:
+                self.send_err(400, "没有该可执行文件的适配器模板: %s" % executable)
+                return
+            existing = runner.get_adapter(adapter["id"])
             runner.add_adapter(adapter)
             self.send_json(adapter, 201)
             return

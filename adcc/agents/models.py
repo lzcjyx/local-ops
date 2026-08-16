@@ -42,6 +42,9 @@ def adapter_default():
         "cwd_template": None,
         "stdin_mode": "file",  # none | file | stdin
         "supports_noninteractive": True,
+        # P1：cost/token 元数据（展示用，不参与调度）
+        "cost": None,          # {"model": str, "inputPer1k": float, "outputPer1k": float}
+        "token_budget": None,  # 每次会话 token 预算上限（int）
         "created_at": 0,
     }
 
@@ -67,7 +70,7 @@ def session_default():
 
 def make_adapter(*, name, executable, args_template=None, env_template=None,
                  cwd_template=None, stdin_mode="file",
-                 supports_noninteractive=True):
+                 supports_noninteractive=True, cost=None, token_budget=None):
     adapter = adapter_default()
     adapter.update({
         "id": new_id(),
@@ -78,6 +81,8 @@ def make_adapter(*, name, executable, args_template=None, env_template=None,
         "cwd_template": cwd_template,
         "stdin_mode": stdin_mode,
         "supports_noninteractive": bool(supports_noninteractive),
+        "cost": cost,
+        "token_budget": token_budget,
         "created_at": int(time.time()),
     })
     validate_adapter(adapter)
@@ -122,6 +127,18 @@ def validate_adapter(adapter):
         raise ValueError("env_template 必须是字符串映射")
     if adapter.get("stdin_mode") not in ("none", "file", "stdin"):
         raise ValueError("stdin_mode 必须是 none/file/stdin")
+    cost = adapter.get("cost")
+    if cost is not None:
+        if not isinstance(cost, dict):
+            raise ValueError("cost 必须是对象或 null")
+        model = cost.get("model")
+        if model is not None and not isinstance(model, str):
+            raise ValueError("cost.model 必须是字符串")
+    budget = adapter.get("token_budget")
+    if budget is not None and (
+            not isinstance(budget, int) or isinstance(budget, bool)
+            or budget <= 0):
+        raise ValueError("token_budget 必须是正整数或 null")
 
 
 def validate_session(session):

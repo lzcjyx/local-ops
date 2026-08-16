@@ -149,6 +149,15 @@ class AgentRunner:
             "worktree_path": None,
             "run_id": session.get("id"),
         }
+        wants_worktree = any(
+            "{worktree_path}" in str(item)
+            for item in (adapter.get("args_template") or [])
+        ) or "{worktree_path}" in str(adapter.get("cwd_template") or "")
+        if wants_worktree:
+            worktree_path = self._create_worktree(session, project)
+            if worktree_path is None:
+                return "需要 worktree 但创建失败（项目不是 Git 仓库？）"
+            variables["worktree_path"] = worktree_path
         argv = render_command(adapter, variables)
         env = dict(os.environ)
         env.update(render_env(adapter, variables))
@@ -319,6 +328,26 @@ class AgentRunner:
                 if error:
                     self._db.update_session(session["id"], {
                         "status": "failed", "ended_at": int(time.time())})
+
+    def _create_worktree(self, session, project):
+        """Create an ADCC-owned worktree for an agent session (P1).
+
+        Branch: ``adcc/<session-id>/<run8>``; path under the prompts
+        sibling ``worktrees/`` data directory.  Returns the path or None.
+        """
+        from adcc.git.repository import create_worktree, detect_repo
+        repo = detect_repo(project.get("root_path"))
+        if repo is None:
+            return None
+        from adcc.git.repository import adcc_worktree_branch
+        branch = adcc_worktree_branch(session.get("id"), session.get("id"))
+        path = os.path.join(os.path.dirname(self._prompts_dir),
+                            "worktrees", session["id"])
+        try:
+            created, error = create_worktree(repo, branch, path)
+        except Exception:
+            return None
+        return created if error is None else None
 
     def _publish(self, session):
         if self._events is None or session is None:

@@ -256,6 +256,9 @@ def _detect_platform():
     if sys.platform.startswith("win"):
         from .windows import WindowsPlatformAdapter
         return WindowsPlatformAdapter()
+    if sys.platform.startswith("linux"):
+        from .linux import LinuxPlatformAdapter
+        return LinuxPlatformAdapter()
     from .unsupported import UnsupportedPlatformAdapter
     return UnsupportedPlatformAdapter(sys.platform)
 
