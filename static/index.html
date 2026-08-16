@@ -375,6 +375,10 @@
 
           <!-- ===== 项目视图 ===== -->
           <section class="view" id="view-projects" role="tabpanel" aria-hidden="true">
+            <div class="sec-label-row">
+              <div class="sec-label"><span>项目</span><span class="sec-count" id="projectsCount"></span></div>
+              <button class="btn btn-sm" id="projectsNewBtn" type="button">新建项目</button>
+            </div>
             <div class="projects-grid" id="projectsGrid"></div>
           </section>
 
@@ -382,13 +386,20 @@
           <section class="view" id="view-agents" role="tabpanel" aria-hidden="true">
             <div class="sec-label-row">
               <div class="sec-label"><span>Agent 会话</span><span class="sec-count" id="agentsCount"></span></div>
-              <button class="btn btn-sm" id="agentsNewBtn" type="button">新建会话</button>
+              <div class="btn-group">
+                <button class="btn btn-sm" id="agentsAdapterBtn" type="button">注册适配器</button>
+                <button class="btn btn-sm" id="agentsNewBtn" type="button">新建会话</button>
+              </div>
             </div>
             <div class="agent-list" id="agentsList"></div>
           </section>
 
           <!-- ===== 工作流视图 ===== -->
           <section class="view" id="view-workflows" role="tabpanel" aria-hidden="true">
+            <div class="sec-label-row">
+              <div class="sec-label"><span>工作流</span><span class="sec-count" id="workflowsCount"></span></div>
+              <button class="btn btn-sm" id="workflowsNewBtn" type="button">新建工作流</button>
+            </div>
             <div class="wf-grid" id="workflowsGrid"></div>
           </section>
 
