@@ -321,7 +321,7 @@ class WindowsPlatformAdapter(PlatformAdapter):
 
     def signal_pid(self, pid, sig):
         force = (sig == 9)
-        return self._taskkill(pid, force=force, tree=False, escalate=not force)
+        return self._taskkill(pid, force=force, escalate=not force)
 
     def signal_group(self, group_id, sig):
         raise _unsupported("signal_group")
@@ -336,20 +336,63 @@ class WindowsPlatformAdapter(PlatformAdapter):
         raise _unsupported("current_pgrp")
 
     def kill_process(self, pid, force):
-        return self._taskkill(pid, force=force, tree=False)
+        return self._taskkill(pid, force=force)
 
     def terminate_tree(self, pid, force):
-        return self._taskkill(pid, force=force, tree=True, escalate=not force)
+        """End a process and its descendants, one PID at a time.
 
-    def _taskkill(self, pid, force, tree, escalate=False):
-        """End a process (tree).  ``escalate`` retries with /F when the
+        ``taskkill /T`` aborts the whole operation when any member (e.g.
+        the console host) cannot be terminated; killing each verified
+        member independently avoids that.  conhost.exe members are
+        skipped — they die with their console client and cannot be
+        taskkill-ed.
+        """
+        origin = self.origin_snapshot()
+        tree = self.process_tree_of(pid)
+        targets = []
+        for member in reversed([int(pid)] + tree):
+            if member == pid:
+                targets.append(member)
+                continue
+            _, args = origin.get(member, ("", ""))
+            if "conhost" in (args or "").lower():
+                continue
+            targets.append(member)
+        last_error = None
+        for member in targets:
+            if force:
+                ok, error = self._taskkill_one(member, True)
+            else:
+                # 优雅请求 → 失败自动升级 /F（控制台进程无 SIGTERM）
+                ok, error = self._taskkill(member, force=False, escalate=True)
+            if not ok and error and "not found" not in error.lower():
+                last_error = error
+        if not self.pid_alive(pid):
+            return True, None
+        return False, last_error or "进程仍在运行"
+
+    def _taskkill_one(self, pid, force):
+        base = ["taskkill", "/PID", str(int(pid))]
+        if force:
+            base.append("/F")
+        try:
+            r = subprocess.run(base, capture_output=True, text=True,
+                               errors="replace", timeout=TASKKILL_TIMEOUT)
+        except Exception as e:
+            return False, "结束失败: %s" % e
+        if r.returncode == 0:
+            return True, None
+        if _taskkill_not_found(r):
+            return True, None
+        return False, _taskkill_error(r) or "结束进程失败"
+
+    def _taskkill(self, pid, force, escalate=False):
+        """End one process.  ``escalate`` retries with /F when the
         graceful request fails — Windows console processes have no
         SIGTERM, so a hard terminate is their only stop mechanism.  The
         target has already passed managed-identity validation before this
         primitive is called."""
         base = ["taskkill", "/PID", str(int(pid))]
-        if tree:
-            base.append("/T")
         attempts = [base] if force else ([base] if not escalate else [base, base + ["/F"]])
         for index, args in enumerate(attempts):
             try:

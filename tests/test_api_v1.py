@@ -263,7 +263,8 @@ class V1RunLifecycleTests(unittest.TestCase):
         """Exit gate: restart must not mark vanished work as success."""
         app = self._register_service(0)
         app["kind"] = "task"
-        app["command"] = "python -c 'import time; time.sleep(30)'"
+        # 双引号：单引号在 Windows cmd 批处理里不是引号，命令会立即失败
+        app["command"] = 'python -c "import time; time.sleep(30)"'
         app["port"] = None
         self.h.cfg.update(lambda d: d["apps"][-1].update(app))
         db = server.get_runs_db()
@@ -273,15 +274,27 @@ class V1RunLifecycleTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         deadline = time.time() + 10
         while time.time() < deadline:
-            if db.list_runs(app_id="abcdefab"):
+            runs = db.list_runs(app_id="abcdefab")
+            if runs and runs[0]["status"] == "running":
                 break
             time.sleep(0.2)
+        self.assertEqual(runs[0]["status"], "running",
+                         "任务应保持运行中（进程秒退说明命令有误）")
         # 模拟进程消失但身份仍在配置里（例如外部杀掉了进程）
         with mock.patch.object(server, "app_running", return_value=False):
             server.reconcile_runs(self.h.cfg)
         runs = db.list_runs(app_id="abcdefab")
         self.assertEqual(runs[0]["status"], "lost")
         self.assertNotEqual(runs[0]["status"], "succeeded")
+        # 清理真实进程，避免残留持有日志文件（reconcile 只是状态对账）
+        current = next((a for a in self.h.cfg.snapshot()["apps"]
+                        if a["id"] == "abcdefab"), None)
+        pid = current.get("lastPid") if current else None
+        if isinstance(pid, int) and pid > 0:
+            server.PLATFORM.terminate_tree(pid, force=True)
+            deadline = time.time() + 5
+            while time.time() < deadline and server.PLATFORM.pid_alive(pid):
+                time.sleep(0.1)
 
 
 class V1EventStreamTests(unittest.TestCase):
