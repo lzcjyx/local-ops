@@ -43,7 +43,7 @@ _CIM_SCRIPT = r"""
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'SilentlyContinue'
 $fields = 'ProcessId','ParentProcessId','Name','ExecutablePath','CommandLine',`
-'CreationDate','WorkingSetSize','SessionId'
+'CreationDate','WorkingSetSize','SessionId','KernelModeTime','UserModeTime'
 $rows = Get-CimInstance Win32_Process -Property $fields
 $total = (Get-CimInstance Win32_OperatingSystem -Property TotalVisibleMemorySize).TotalVisibleMemorySize
 $items = foreach ($row in $rows) {
@@ -56,6 +56,8 @@ $items = foreach ($row in $rows) {
     created = $row.CreationDate
     wss = $row.WorkingSetSize
     session = $row.SessionId
+    ktime = $row.KernelModeTime
+    utime = $row.UserModeTime
   }
 }
 if ($total -gt 0) {
@@ -75,6 +77,8 @@ class WindowsPlatformAdapter(PlatformAdapter):
     def __init__(self):
         self._session_id = None
         self._full_cache = (0.0, None)
+        self._cpu_samples = {}   # pid -> (monotonic, ktime+utime ticks)
+        self._cpu_cores = max(1, os.cpu_count() or 1)
 
     def pid_alive(self, pid):
         """ctypes liveness probe.
@@ -216,14 +220,44 @@ class WindowsPlatformAdapter(PlatformAdapter):
         mem = 0.0
         if total_kb and total_kb > 0:
             mem = round((wss_bytes / (total_kb * 1024.0)) * 100.0, 2)
+        pid = entry.get("pid")
+        cpu = self._cpu_delta(
+            pid, entry.get("ktime"), entry.get("utime"))
         return {
             "uid": self._owner_for(entry),
             "comm": entry.get("name") or entry.get("exe") or "?",
             "args": entry.get("args") or "",
-            "cpu": 0.0,
+            "cpu": cpu,
             "mem": mem,
             "etime": etime,
         }
+
+    def _cpu_delta(self, pid, ktime, utime):
+        """CPU% from kernel+user time deltas between samples.
+
+        Win32_Process times are 100ns units; percent = delta_ticks /
+        delta_wall / 1e7 / cores.  First observation returns 0.0.
+        """
+        now = time.monotonic()
+        ticks = 0
+        try:
+            ticks = int(ktime or 0) + int(utime or 0)
+        except (TypeError, ValueError):
+            ticks = 0
+        previous = self._cpu_samples.get(pid)
+        self._cpu_samples[pid] = (now, ticks)
+        if previous is None:
+            return 0.0
+        prev_time, prev_ticks = previous
+        delta_time = now - prev_time
+        if delta_time <= 0 or ticks < prev_ticks:
+            return 0.0
+        used = (ticks - prev_ticks) / 10000000.0
+        return round(min(100.0, used / delta_time / self._cpu_cores * 100.0), 2)
+
+    def invalidate_cache(self):
+        """启动新进程后调用：清空全量 CIM 缓存，使身份识别立即可见。"""
+        self._full_cache = (0.0, None)
 
     def process_snapshot(self, pids=None, with_uid=True):
         payload = self._cim_query(pids)

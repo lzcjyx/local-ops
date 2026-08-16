@@ -109,7 +109,7 @@ async function ensureV1() {
 
 /* ================= 模态基座 ================= */
 function openModal(title, fields, onSave) {
-  const overlay = el('div', 'modal-mask');
+  const overlay = el('div', 'modal-mask open');
   const modal = el('div', 'modal');
   const save = el('button', 'btn', '确定');
   save.type = 'button';
@@ -225,13 +225,45 @@ function renderOverview(data) {
 }
 
 /* ================= 项目 ================= */
+function exportManifest() {
+  fetchJson('/api/v1/projects/export').then(manifest => {
+    const blob = new Blob([JSON.stringify(manifest, null, 2)],
+      { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = el('a');
+    link.href = url;
+    link.download = 'adcc-projects.json';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }).catch(() => {});
+}
+
+function importManifest() {
+  const fileInput = el('input');
+  fileInput.type = 'file';
+  fileInput.accept = '.json,application/json';
+  fileInput.addEventListener('change', async () => {
+    const file = fileInput.files && fileInput.files[0];
+    if (!file) return;
+    try {
+      const manifest = JSON.parse(await file.text());
+      const result = await postJson('/api/v1/projects/import', manifest);
+      window.__poll && window.__poll();
+      ensureV1();
+    } catch (e) { /* 静默 */ }
+  });
+  fileInput.click();
+}
+
 function openProjectModal() {
   const nameInput = textInput('项目名称');
   const pathInput = textInput('项目根路径（绝对路径）');
   const templateSelect = selectNode(
     cachedV1.templates.map(t => [t.id, t.name + ' — ' + t.description]),
     '不使用模板');
-  openModal('新建项目', [
+  const overlay = openModal('新建项目', [
     { label: '名称', node: nameInput },
     { label: '根路径', node: pathInput },
     { label: '模板（可选）', node: templateSelect },
@@ -246,6 +278,7 @@ function openProjectModal() {
     });
     window.__poll && window.__poll();
   });
+  overlay.close.focus();
 }
 
 function projectCard(project, data) {
@@ -271,6 +304,10 @@ function projectCard(project, data) {
   const body = el('div', 'project-body');
   const sessions = cachedV1.sessions.filter(s => s.projectId === project.id);
   const workflows = cachedV1.workflows.filter(w => w.projectId === project.id);
+  const worktrees = cachedV1.worktrees
+    .filter(w => w.projectId === project.id)
+    .flatMap(w => w.worktrees || [])
+    .filter(w => w.branch && w.branch.startsWith('adcc/'));
   const lines = [];
   if (project.repoPath) {
     lines.push(el('div', 'project-line',
@@ -278,6 +315,11 @@ function projectCard(project, data) {
   } else if (project.rootPath) {
     lines.push(el('div', 'project-line mono',
       icon('folder', 13), ' ' + escapeHtml(project.rootPath)));
+  }
+  if (worktrees.length) {
+    lines.push(el('div', 'project-line',
+      icon('link-2', 13), ' ' + worktrees.length + ' 个隔离 worktree（' +
+      worktrees.map(w => escapeHtml(w.branch)).join('、') + '）'));
   }
   if (sessions.length) {
     lines.push(el('div', 'project-line',
@@ -343,7 +385,7 @@ function openAdapterModal() {
   const executableInput = textInput('可执行文件（如 opencode）');
   const argsInput = textInput('参数模板，逗号分隔（如 run,--prompt-file,{prompt_file}）');
   const envInput = textInput('环境模板，KEY=VALUE 逗号分隔（可选）');
-  openModal('注册 Agent 适配器', [
+  const overlay = openModal('注册 Agent 适配器', [
     { label: '名称', node: nameInput },
     { label: '可执行文件', node: executableInput },
     { label: '参数模板', node: argsInput },
@@ -366,6 +408,24 @@ function openAdapterModal() {
       stdinMode: 'file',
     });
   });
+  /* P1：探测已安装的编码 Agent，一键填充 */
+  fetchJson('/api/v1/agents/discovery').then(found => {
+    if (!found || !found.length) return;
+    const bar = el('div', 'agent-adapters');
+    for (const agent of found) {
+      const chip = el('button', 'chip-btn', icon('bot', 12) + ' ' +
+        escapeHtml(agent.label));
+      chip.type = 'button';
+      chip.addEventListener('click', () => {
+        nameInput.value = agent.label;
+        executableInput.value = agent.executable;
+        argsInput.value = (agent.argsTemplate || []).join(',');
+      });
+      bar.appendChild(chip);
+    }
+    const title = overlay.close.parentElement.querySelector('.modal-title');
+    if (title) title.parentElement.insertBefore(bar, title.nextSibling);
+  }).catch(() => {});
 }
 
 function openAgentModal() {
@@ -655,6 +715,10 @@ export function initViews() {
   setChildren($('#railIconWorkflows'), icon('link-2', 19));
   const newProject = $('#projectsNewBtn');
   if (newProject) newProject.addEventListener('click', openProjectModal);
+  const importBtn = $('#projectsImportBtn');
+  if (importBtn) importBtn.addEventListener('click', importManifest);
+  const exportBtn = $('#projectsExportBtn');
+  if (exportBtn) exportBtn.addEventListener('click', exportManifest);
   const newAgent = $('#agentsNewBtn');
   if (newAgent) newAgent.addEventListener('click', openAgentModal);
   const adapterBtn = $('#agentsAdapterBtn');

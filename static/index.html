@@ -377,7 +377,11 @@
           <section class="view" id="view-projects" role="tabpanel" aria-hidden="true">
             <div class="sec-label-row">
               <div class="sec-label"><span>项目</span><span class="sec-count" id="projectsCount"></span></div>
-              <button class="btn btn-sm" id="projectsNewBtn" type="button">新建项目</button>
+              <div class="btn-group">
+                <button class="btn btn-sm" id="projectsImportBtn" type="button">导入</button>
+                <button class="btn btn-sm" id="projectsExportBtn" type="button">导出</button>
+                <button class="btn btn-sm" id="projectsNewBtn" type="button">新建项目</button>
+              </div>
             </div>
             <div class="projects-grid" id="projectsGrid"></div>
           </section>
